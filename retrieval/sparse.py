@@ -26,7 +26,8 @@ class BM25Retriever:
         # We index both normal text and FAQ pairs for keyword searches
         cursor.execute("""
             SELECT c.chunk_id, c.document_id, c.parent_chunk_id, c.chunk_type, c.page_number, 
-                   c.chapter_title, c.section_title, c.chunk_text, d.document_name, d.circular_number, d.ref_number
+                   c.chapter_title, c.section_title, c.chunk_text, 
+                   d.document_name, d.circular_number, d.ref_number, d.filename, d.source_pdf_path
             FROM chunks c
             JOIN documents d ON c.document_id = d.document_id
             WHERE c.chunk_type IN ('text', 'faq_pair')

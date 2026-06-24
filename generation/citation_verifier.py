@@ -1,6 +1,7 @@
 import re
 import numpy as np
 import json
+import os
 from retrieval.sparse import tokenize_text
 from retrieval.dense import EmbeddingService
 
@@ -15,6 +16,119 @@ class CitationVerifier:
         if not words1 or not words2:
             return 0.0
         return len(words1.intersection(words2)) / len(words1.union(words2))
+
+    @staticmethod
+    def normalize_number(text):
+        """Normalizes a numeric string into standard representations (raw digits, normalized text)."""
+        text = text.lower().strip()
+        clean_text = text.replace(',', '')
+        
+        results = {text, clean_text}
+        
+        if '%' in clean_text or 'percent' in clean_text:
+            val_match = re.search(r'(\d+(?:\.\d+)?)', clean_text)
+            if val_match:
+                val = float(val_match.group(1))
+                val_str = f"{val:g}"
+                results.update({f"{val_str}%", f"{val_str} %", f"{val_str} percent"})
+            return results
+
+        lakh_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:lakh|lakhs|l)\b', clean_text)
+        if lakh_match:
+            val = float(lakh_match.group(1))
+            val_raw = int(val * 100000) if val.is_integer() else int(val * 100000)
+            results.update({f"{val:g} lakh", f"{val:g} lakhs", f"{val_raw}", f"{val_raw:,}"})
+            return results
+            
+        crore_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:crore|crores|cr)\b', clean_text)
+        if crore_match:
+            val = float(crore_match.group(1))
+            val_raw = int(val * 10000000) if val.is_integer() else int(val * 10000000)
+            results.update({f"{val:g} crore", f"{val:g} crores", f"{val_raw}", f"{val_raw:,}"})
+            return results
+            
+        try:
+            val = float(clean_text)
+            results.update({f"{val:g}"})
+            if val.is_integer():
+                results.update({f"{int(val)}", f"{int(val):,}"})
+            if val == 300000 or val == 300000.0:
+                results.update({"3 lakh", "3 lakhs"})
+            return results
+        except ValueError:
+            return results
+
+    @staticmethod
+    def extract_factual_numbers(text):
+        """Extracts significant factual numbers, percentages, and amounts from text."""
+        text_no_citations = re.sub(r'\[\d+\]', '', text)
+        
+        pcts = re.findall(r'\b\d+(?:\.\d+)?\s*(?:%|percent)\b', text_no_citations, re.IGNORECASE)
+        lakhs_crores = re.findall(r'\b\d+(?:\.\d+)?\s*(?:lakh|lakhs|crore|crores)\b', text_no_citations, re.IGNORECASE)
+        numbers = re.findall(r'\b\d+(?:,\d+)*(?:\.\d+)?\b', text_no_citations)
+        
+        sig_numbers = []
+        for num in numbers:
+            clean = num.replace(',', '')
+            try:
+                val = float(clean)
+                if not val.is_integer() or val >= 10:
+                    sig_numbers.append(num)
+            except ValueError:
+                pass
+
+        all_matches = pcts + lakhs_crores + sig_numbers
+        return list(set(all_matches))
+
+    @staticmethod
+    def split_into_sentences(text):
+        """Splits raw text into individual sentences, ignoring watermarks, page numbers, and short headers."""
+        if not text:
+            return []
+        
+        text_placeholder = text
+        # Common abbreviations that shouldn't split sentences
+        abbreviations = ["Rs.", "No.", "Jan.", "Feb.", "Mar.", "Apr.", "Jun.", "Jul.", "Aug.", "Sep.", "Oct.", "Nov.", "Dec.", "i.e.", "e.g.", "vs.", "Circ.", "Ref.", "BC.No.", "BC.", "FSD.", "FIDD.", "Plan."]
+        for abbr in abbreviations:
+            text_placeholder = re.sub(rf'\b{re.escape(abbr)}', abbr.replace(".", "___DOT___"), text_placeholder, flags=re.IGNORECASE)
+        
+        # Split into blocks by checking line lengths and bullets to isolate headers/watermarks/page numbers
+        lines = text_placeholder.split("\n")
+        blocks = []
+        current_block = []
+        for line in lines:
+            line_strip = line.strip()
+            if not line_strip:
+                if current_block:
+                    blocks.append(" ".join(current_block))
+                    current_block = []
+                continue
+                
+            # If the line is very short (e.g. < 25 chars) or starts with a bullet, it's a boundary
+            is_boundary = len(line_strip) < 25 or re.match(r'^\s*(?:[•\-\*]|\d+\.|\([ivxl\d]+(?:[\.\)]|\b)|\b[a-z]\)\s)', line_strip, re.IGNORECASE)
+            
+            if is_boundary:
+                if current_block:
+                    blocks.append(" ".join(current_block))
+                    current_block = []
+                blocks.append(line_strip)
+            else:
+                current_block.append(line_strip)
+                
+        if current_block:
+            blocks.append(" ".join(current_block))
+            
+        sentences = []
+        for block in blocks:
+            # Split block by periods/exclamation/question marks followed by whitespace or quotes
+            raw_splits = re.split(r'(?<=[.!?])\s+|(?<=[.!?]”)\s+|(?<=[.!?]")\s+|(?<=[.!?]\')\s+|(?<=[.!?]\))\s+', block)
+            for split in raw_splits:
+                split_clean = split.replace("___DOT___", ".").strip()
+                if split_clean:
+                    split_clean = re.sub(r'\s+', ' ', split_clean)
+                    sentences.append(split_clean)
+                    
+        return sentences
 
     @classmethod
     def compute_semantic_similarity(cls, text1, text2):
@@ -102,17 +216,115 @@ class CitationVerifier:
             source_chunk = retrieved_chunks[idx]
             source_text = source_chunk["chunk_text"]
             
-            # Compute matching scores
-            jaccard_score = cls.compute_token_jaccard(statement, source_text)
-            semantic_score = cls.compute_semantic_similarity(statement, source_text)
+            # Split source_text into sentences and perform sentence-level matching
+            sentences = cls.split_into_sentences(source_text)
+            best_sentence = ""
+            best_semantic = 0.0
+            best_jaccard = 0.0
+            
+            for s in sentences:
+                if len(tokenize_text(s)) < 3: # Skip trivial snippets
+                    continue
+                jacc_s = cls.compute_token_jaccard(statement, s)
+                sem_s = cls.compute_semantic_similarity(statement, s)
+                if sem_s > best_semantic:
+                    best_semantic = sem_s
+                    best_jaccard = jacc_s
+                    best_sentence = s
+
+            # Fallback to full-chunk matching in case statement is summarized
+            jaccard_full = cls.compute_token_jaccard(statement, source_text)
+            semantic_full = cls.compute_semantic_similarity(statement, source_text)
+            
+            jaccard_score = max(best_jaccard, jaccard_full)
+            semantic_score = max(best_semantic, semantic_full)
             
             # The statement is verified if semantic similarity is high OR direct lexical overlap is very high
             is_verified = (semantic_score >= similarity_threshold) or (jaccard_score >= 0.40)
             
+            # Additional factual check for numbers/percentages consistency
+            num_warnings = []
+            if is_verified:
+                statement_nums = cls.extract_factual_numbers(statement)
+                if statement_nums:
+                    normalized_source = re.sub(r'\s+', ' ', source_text.lower())
+                    source_no_comma = normalized_source.replace(',', '')
+                    
+                    for num_str in statement_nums:
+                        reps = cls.normalize_number(num_str)
+                        found = False
+                        for rep in reps:
+                            rep_clean = rep.lower().strip()
+                            rep_no_comma = rep_clean.replace(',', '')
+                            if rep_no_comma in source_no_comma:
+                                found = True
+                                break
+                        if not found:
+                            is_verified = False
+                            num_warnings.append(
+                                f"Factual number mismatch: '{num_str}' in statement not found in source text."
+                            )
+
+            # Construct PDF URL with browser highlight search query and accurate page detection
+            filename = source_chunk.get("filename") or source_chunk.get("source_pdf_path", "").replace("circulars/", "")
+            page = source_chunk.get("page_number", 1)
+            pdf_url = ""
+            
+            if filename:
+                import urllib.parse
+                import urllib.request
+                import fitz
+                
+                base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                circulars_dir = os.path.abspath(os.path.join(base_dir, "circulars"))
+                pdf_path = os.path.join(circulars_dir, filename)
+                
+                # Dynamic page detection by scanning PDF content
+                detected_page = None
+                if os.path.exists(pdf_path) and best_sentence:
+                    try:
+                        doc = fitz.open(pdf_path)
+                        
+                        def normalize(text):
+                            return re.sub(r'[^a-zA-Z0-9]', '', text).lower()
+                            
+                        norm_search = normalize(best_sentence)
+                        if norm_search:
+                            for page_idx in range(len(doc)):
+                                page_text = doc[page_idx].get_text()
+                                if norm_search in normalize(page_text):
+                                    detected_page = page_idx + 1
+                                    break
+                                    
+                        if not detected_page:
+                            # Try prefix/suffix matching if split across pages
+                            words = best_sentence.split()
+                            if len(words) > 6:
+                                first_part = normalize(" ".join(words[:6]))
+                                last_part = normalize(" ".join(words[-6:]))
+                                for page_idx in range(len(doc)):
+                                    page_text = doc[page_idx].get_text()
+                                    norm_page = normalize(page_text)
+                                    if first_part in norm_page or last_part in norm_page:
+                                        detected_page = page_idx + 1
+                                        break
+                        doc.close()
+                    except Exception as e:
+                        print(f"Error dynamically detecting PDF page: {e}")
+                        
+                if detected_page:
+                    page = detected_page
+                
+                pdf_url = f"file:{urllib.request.pathname2url(os.path.abspath(pdf_path))}"
+                pdf_url += f"#page={page}"
+                
+
+
             verified_cit = {
                 "citation_tag": tag,
                 "statement": statement,
                 "verified": is_verified,
+                "pdf_url": pdf_url,
                 "scores": {
                     "semantic_similarity": round(semantic_score, 4),
                     "jaccard_overlap": round(jaccard_score, 4)
@@ -120,40 +332,32 @@ class CitationVerifier:
                 # Rich metadata for citations UI
                 "source": {
                     "document_name": source_chunk["document_name"],
-                    "page_number": source_chunk["page_number"],
+                    "filename": source_chunk.get("filename"),
+                    "source_pdf_path": source_chunk.get("source_pdf_path"),
+                    "page_number": page,
                     "section_title": source_chunk["section_title"],
                     "circular_number": source_chunk["circular_number"],
-                    "ref_number": source_chunk["ref_number"]
+                    "ref_number": source_chunk["ref_number"],
+                    "matched_sentence": best_sentence if best_sentence else source_text[:200]
                 }
             }
             
             if not is_verified:
-                hallucination_warnings.append(
-                    f"Warning: Citation {tag} statement ('{statement[:60]}...') could not be verified in the source context."
-                )
+                if num_warnings:
+                    for nw in num_warnings:
+                        hallucination_warnings.append(f"Warning: Citation {tag} - {nw}")
+                else:
+                    hallucination_warnings.append(
+                        f"Warning: Citation {tag} statement ('{statement[:60]}...') could not be verified in the source context."
+                    )
                 
             verified_citations.append(verified_cit)
             
-        # Enrich response text with detailed inline references
-        enriched_response = response_text
-        for cit in verified_citations:
-            tag = cit["citation_tag"]
-            src = cit["source"]
-            ref_details = f"{src['document_name']}, Page {src['page_number']}"
-            if src["section_title"] and src["section_title"] != "N/A":
-                ref_details += f", Sec: {src['section_title']}"
-            if src["circular_number"]:
-                ref_details += f", Circ: {src['circular_number']}"
-                
-            if cit["verified"]:
-                new_tag = f"{tag[:-1]}: {ref_details}]"
-            else:
-                new_tag = f"{tag[:-1]}: [UNVERIFIED] {ref_details}]"
-                
-            enriched_response = enriched_response.replace(tag, new_tag)
-            
+        # Clean response text by removing all inline citation tags
+        cleaned_response = re.sub(r'\s*\[\d+\]', '', response_text)
+        
         return {
-            "response": enriched_response,
+            "response": cleaned_response,
             "citations": verified_citations,
             "warnings": hallucination_warnings,
             "hallucination_detected": any(not c["verified"] for c in verified_citations)

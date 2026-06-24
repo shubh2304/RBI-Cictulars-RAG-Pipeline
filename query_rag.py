@@ -79,13 +79,19 @@ def query_system(query_text, top_k=5):
         statement = sanitize_text(cit["statement"])
         doc = sanitize_text(src["document_name"])
         sec = sanitize_text(src["section_title"])
+        pdf_url = cit.get("pdf_url", "")
         
         print(f"{tag} [{verified}]")
-        print(f"  Statement : \"{statement}\"")
-        print(f"  Source    : {doc}")
+        print(f"  Statement   : \"{statement}\"")
+        if "matched_sentence" in src:
+            matched_sentence = sanitize_text(src["matched_sentence"])
+            print(f"  Source Text : \"{matched_sentence}\"")
+        print(f"  Source      : {doc}")
         print(f"  Location  : Page {src['page_number']} | Section: {sec}")
         if src["ref_number"] or src["circular_number"]:
             print(f"  Details   : Ref: {src['ref_number']} | Circular: {src['circular_number']}")
+        if pdf_url:
+            print(f"  PDF Link (Click to Open to specific page/highlight): {pdf_url}")
         print("-" * 50)
         
     if final_response["warnings"]:

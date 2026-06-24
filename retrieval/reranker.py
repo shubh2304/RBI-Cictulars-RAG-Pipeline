@@ -17,7 +17,7 @@ class Reranker:
         return cls._model
 
     @classmethod
-    def rerank(cls, query, chunks, top_k=5):
+    def rerank(cls, query, chunks, top_k=5, filter_noise=True):
         """
         Takes a query and list of chunk dicts, scores them with CrossEncoder,
         and returns the top-K sorted results.
@@ -43,7 +43,18 @@ class Reranker:
         # Sort by rerank score in descending order
         reranked_chunks.sort(key=lambda x: x["rerank_score"], reverse=True)
         
-        return reranked_chunks[:top_k]
+        results = reranked_chunks[:top_k]
+        
+        if filter_noise and results:
+            top_score = results[0]["rerank_score"]
+            filtered = [results[0]]
+            for c in results[1:]:
+                # Keep if score is within 0.35 of the top score OR above absolute threshold of 0.1
+                if (c["rerank_score"] >= top_score - 0.35) or (c["rerank_score"] >= 0.1):
+                    filtered.append(c)
+            results = filtered
+            
+        return results
 
 if __name__ == "__main__":
     # Test execution
