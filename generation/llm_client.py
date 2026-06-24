@@ -269,14 +269,14 @@ class LLMClient:
         
         try:
             print(f"Connecting to local LLM server at {LLM_API_URL}...")
-            with urllib.request.urlopen(req, timeout=45) as response:
+            with urllib.request.urlopen(req, timeout=90) as response:
                 res_data = response.read().decode("utf-8")
                 res_json = json.loads(res_data)
                 content = res_json["choices"][0]["message"]["content"]
                 cleaned_content = clean_json_response(content)
                 return json.loads(cleaned_content)
-        except (urllib.error.URLError, ConnectionRefusedError) as e:
-            print(f"\nWARNING: Could not connect to local LLM server: {e}")
+        except (urllib.error.URLError, ConnectionRefusedError, TimeoutError) as e:
+            print(f"\nWARNING: Could not connect to or timed out from local LLM server: {e}")
             print("[Local Fallback] Falling back to native in-memory Transformers execution...")
             try:
                 raw_response = LocalTransformersLLM.generate(system_prompt, user_prompt)
