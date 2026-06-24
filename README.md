@@ -8,7 +8,7 @@ This document describes the design philosophy, technical architecture, and execu
 
 The system relies strictly on low-level libraries to handle core operations:
 * **PDF Processing**: `PyMuPDF` (fast text extraction & metadata matching) and `pdfplumber` (clean tabular layout extraction).
-* **OCR Fallback**: `easyocr` (for image-only scanned files).
+* **OCR Fallback**: `paddleocr` (for image-only scanned files).
 * **Database & Cache**: `sqlite3` (native SQL storage for parsed metadata, audit log trails, and semantic caching).
 * **Lexical Search (Sparse)**: `rank-bm25` (pure python BM25Okapi implementation).
 * **Semantic Search (Dense)**: `sentence-transformers` (runs `BAAI/bge-small-en-v1.5` embeddings) and `faiss-cpu` (exact inner-product indexing for cosine matches).
@@ -29,7 +29,7 @@ The pipeline is structured into three execution cycles: Ingestion, Retrieval, an
              ┌─────────────┴─────────────┐
              ▼                           ▼
        Standard PDF                 Scanned PDF
-      (fitz extraction)            (easyocr raster)
+      (fitz extraction)            (paddleocr raster)
              │                           │
              └─────────────┬─────────────┘
                            ▼
@@ -128,7 +128,7 @@ RBI RAG/
 │
 ├── ingestion/
 │   ├── pdf_extractor.py      # Fitz + pdfplumber page/table reader & title classifier
-│   ├── ocr_fallback.py       # Scanned PDF text extraction via easyocr
+│   ├── ocr_fallback.py       # Scanned PDF text extraction via paddleocr
 │   ├── parser.py             # Section-aware parser & parent-child chunk linker
 │   └── seed.py               # Document scanning & DB populator
 │
@@ -150,7 +150,7 @@ RBI RAG/
 ### Prerequisites
 Install all backend dependencies:
 ```powershell
-pip install uvicorn fastapi pydantic pymupdf pdfplumber sentence-transformers faiss-cpu rank-bm25 torch easyocr
+pip install uvicorn fastapi pydantic pymupdf pdfplumber sentence-transformers faiss-cpu rank-bm25 torch paddlepaddle paddleocr
 ```
 
 ### 1. Database Seeding & Ingestion

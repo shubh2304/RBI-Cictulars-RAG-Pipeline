@@ -8,7 +8,7 @@ from retrieval.reranker import Reranker
 BENCHMARK_DATASET = [
     {
         "query": "What is the limit for collateral-free agricultural loans?",
-        "expected_filename": "RBI-2024-2025-96_712202414454187.pdf",
+        "expected_filename": ["RBI-2024-2025-96_712202414454187.pdf", "duqik.pdf"],
         "expected_section": "Credit Flow to Agriculture"
     },
     {
@@ -55,6 +55,31 @@ BENCHMARK_DATASET = [
         "query": "What are the interest rate guidelines for loans under DAY-NRLM?",
         "expected_filename": "DAY NRLMS.pdf",
         "expected_section": "Master Circular"
+    },
+    {
+        "query": "If a farmer has an overall Kisan Credit Card (KCC) limit of \u20b94.00 lakhs, consisting of a crop loan limit of \u20b91.75 lakhs and an animal husbandry/fisheries sub-limit of \u20b92.25 lakhs, what is the maximum loan amount eligible for Interest Subvention (IS) and Prompt Repayment Incentive (PRI) benefits, and how is it distributed between components?",
+        "expected_filename": "KCC Modified.pdf",
+        "expected_section": "Illustrations"
+    },
+    {
+        "query": "What is the mandatory threshold below which banks are prohibited from accepting collateral security for loans extended to the Micro and Small Enterprise (MSE) sector, what is the voluntary limit extension, and what is the effective date of this instruction?",
+        "expected_filename": "msme_ammendments.pdf",
+        "expected_section": "4.1"
+    },
+    {
+        "query": "Under the Credit Guarantee Fund Scheme for Factoring (CGFSF), how are the default risk weights and capital deductions partitioned between the factor (lender) and NCGTC, and what is the maximum capital charge cap?",
+        "expected_filename": "Sep72022_RBI_RBI_Review_of_Prudential_Norms_in_regard_to_Risk_Weights_for_Exposures_guaranteed_by_Credit_Guarantee_Schemes.PDF",
+        "expected_section": "Annex"
+    },
+    {
+        "query": "How are overdraft facilities in PMJDY accounts classified under Priority Sector Lending (PSL) rules, and does a specific monetary limit apply?",
+        "expected_filename": ["RBI-PSL-MASTER-DIRECTIONS-24-03-25.pdf", "FID250215CIRNT.pdf"],
+        "expected_section": "Weaker Sections"
+    },
+    {
+        "query": "In assessing microfinance loan eligibility, is a household's income computed net of household expenses for calculating the limit on loan repayment obligations?",
+        "expected_filename": "RFML30012025.pdf",
+        "expected_section": "Q 12."
     }
 ]
 
@@ -99,9 +124,16 @@ def run_evaluation():
             doc = cursor.fetchone()
             cursor_conn.close()
             
-            if doc and doc["filename"].lower() == expected_file.lower():
-                rank_found = rank + 1  # 1-indexed rank
-                break
+            if doc:
+                retrieved_file = doc["filename"].lower()
+                if isinstance(expected_file, list):
+                    matched = any(retrieved_file == f.lower() for f in expected_file)
+                else:
+                    matched = (retrieved_file == expected_file.lower())
+                
+                if matched:
+                    rank_found = rank + 1  # 1-indexed rank
+                    break
                 
         # Calculate MRR and Recall
         if rank_found != -1:

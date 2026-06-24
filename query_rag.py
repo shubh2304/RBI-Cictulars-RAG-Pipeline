@@ -28,7 +28,7 @@ def sanitize_text(text):
     # Fallback encode/decode to drop any remaining unmappable codes
     return text.encode('ascii', 'replace').decode('ascii')
 
-def query_system(query_text, top_k=3):
+def query_system(query_text, top_k=5):
     print("=" * 80)
     print(f"Query: {query_text}")
     print("=" * 80)

@@ -1,32 +1,35 @@
 import os
 import sys
+import io
+import numpy as np
+from PIL import Image
 
-# Optional EasyOCR import with dynamic check
+# Optional PaddleOCR import with dynamic check
 try:
-    import easyocr
-    EASYOCR_AVAILABLE = True
+    from paddleocr import PaddleOCR
+    PADDLEOCR_AVAILABLE = True
 except ImportError:
-    EASYOCR_AVAILABLE = False
+    PADDLEOCR_AVAILABLE = False
 
 def perform_ocr_on_pdf(pdf_path):
     """
-    Rasters the PDF pages and runs OCR using EasyOCR.
+    Rasters the PDF pages and runs OCR using PaddleOCR.
     Returns a dictionary mapping page numbers (1-indexed) to their extracted text.
     """
-    if not EASYOCR_AVAILABLE:
-        print("WARNING: easyocr is not installed. Scanned PDFs will not have text extracted.")
-        print("To enable OCR, please install easyocr: pip install easyocr torch torchvision")
+    if not PADDLEOCR_AVAILABLE:
+        print("WARNING: paddleocr is not installed. Scanned PDFs will not have text extracted.")
+        print("To enable OCR, please install paddleocr: pip install paddlepaddle paddleocr")
         return {}
 
     import fitz  # PyMuPDF
-    print(f"Running OCR on {os.path.basename(pdf_path)} using EasyOCR...")
+    print(f"Running OCR on {os.path.basename(pdf_path)} using PaddleOCR...")
     
-    # Initialize easyocr Reader for English. This downloads weights if not already present.
-    # We disable GPU if CUDA is not available or if it causes errors
+    # Initialize PaddleOCR reader for English.
     try:
-        reader = easyocr.Reader(['en'], gpu=False) # Safe default, change to gpu=True if CUDA is present
+        # use_angle_cls detects text direction/rotation, show_log keeps logs clean
+        ocr = PaddleOCR(use_angle_cls=True, lang='en', use_gpu=False, show_log=False)
     except Exception as e:
-        print(f"Failed to initialize EasyOCR reader: {e}")
+        print(f"Failed to initialize PaddleOCR reader: {e}")
         return {}
 
     doc = fitz.open(pdf_path)
@@ -41,9 +44,23 @@ def perform_ocr_on_pdf(pdf_path):
             pix = page.get_pixmap(dpi=150)
             img_bytes = pix.tobytes("png")
             
-            # Run OCR on the rendered image
-            results = reader.readtext(img_bytes, detail=0)
-            page_text = "\n".join(results)
+            # Convert bytes to PIL Image, then to a numpy array for PaddleOCR
+            image = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+            img_array = np.array(image)
+            
+            # Run OCR on the rendered image array
+            result = ocr.ocr(img_array, cls=True)
+            
+            page_texts = []
+            if result:
+                for line_group in result:
+                    if line_group:
+                        for line in line_group:
+                            if line and len(line) > 1 and line[1]:
+                                text = line[1][0]
+                                page_texts.append(text)
+                                
+            page_text = "\n".join(page_texts)
             ocr_results[page_num] = page_text
         except Exception as e:
             print(f"  Error performing OCR on page {page_num}: {e}")

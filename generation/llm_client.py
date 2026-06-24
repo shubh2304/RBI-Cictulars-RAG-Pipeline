@@ -6,6 +6,8 @@ import re
 
 LLM_API_URL = os.getenv("LLM_API_URL", "http://localhost:11434/v1/chat/completions")
 LLM_MODEL = os.getenv("LLM_MODEL", "qwen2.5:7b-instruct")
+LLM_API_KEY = os.getenv("LLM_API_KEY")
+LLM_FALLBACK = os.getenv("LLM_FALLBACK", "mock")
 
 def clean_json_response(text):
     """Strips any leading/trailing chat explanation text outside the first { and last }."""
@@ -103,24 +105,45 @@ class LLMClient:
             "Do not assume, extrapolate, or bring in outside knowledge. If the context does not contain the answer, "
             "respond that the information is not available in the retrieved documents.\n\n"
             "CRITICAL INSTRUCTIONS:\n"
-            "1. Output your answer STRICTLY as a JSON object with two fields: 'response' and 'citations'.\n"
-            "2. Write the answer inside 'response'. You MUST attribute every statement to its source by putting "
-            "an inline citation tag (e.g. [1] or [2]) matching the Context Block index at the end of each cited sentence.\n"
-            "3. For each citation tag used, include a record in the 'citations' list specifying:\n"
+            "1. Output your answer STRICTLY as a JSON object with two fields: 'response' and 'citations'. Do not use any other keys.\n"
+            "2. Write the answer inside 'response'. EVERY single sentence in your response MUST end with an inline citation tag (e.g. [1], [2], or [3]) matching the Context Block index.\n"
+            "3. Aim to cite multiple different source blocks (aim for 3 distinct citations, e.g. [1], [2], [3] if the context contains enough relevant details) to ensure a comprehensive, well-supported answer.\n"
+            "4. For each citation tag used, include a record in the 'citations' list specifying:\n"
             "   - 'citation_tag': The tag used (e.g., '[1]')\n"
             "   - 'source_statement': The exact fact or claim in the response that uses this source\n"
             "   - 'source_block_index': The integer index (1-indexed) of the corresponding Context Block.\n\n"
-            "JSON Format:\n"
+            "JSON Format Example:\n"
             "{\n"
-            "  \"response\": \"Your answer text here ending with citation tags. [1] Another sentence. [2]\",\n"
+            "  \"response\": \"Regional Rural Banks have a target of 75 percent for priority sector lending [1]. Within this target, agriculture loans must constitute at least 18 percent of advances [2]. Small and marginal farmers are allocated a sub-target of 10 percent [3].\",\n"
             "  \"citations\": [\n"
-            "    { \"citation_tag\": \"[1]\", \"source_statement\": \"claim 1\", \"source_block_index\": 1 },\n"
-            "    { \"citation_tag\": \"[2]\", \"source_statement\": \"claim 2\", \"source_block_index\": 2 }\n"
+            "    { \"citation_tag\": \"[1]\", \"source_statement\": \"Regional Rural Banks have a target of 75 percent for priority sector lending\", \"source_block_index\": 1 },\n"
+            "    { \"citation_tag\": \"[2]\", \"source_statement\": \"agriculture loans must constitute at least 18 percent of advances\", \"source_block_index\": 2 },\n"
+            "    { \"citation_tag\": \"[3]\", \"source_statement\": \"Small and marginal farmers are allocated a sub-target of 10 percent\", \"source_block_index\": 3 }\n"
             "  ]\n"
             "}"
         )
 
-        user_prompt = f"Context Blocks:\n{context_str}\nQuery: {query}"
+        user_prompt = (
+            f"Context Blocks:\n{context_str}\n\n"
+            f"Query: {query}\n\n"
+            f"CRITICAL INSTRUCTIONS:\n"
+            f"1. Output your answer STRICTLY as a JSON object with two fields: 'response' and 'citations'. Do not use any other keys.\n"
+            f"2. Write the answer inside 'response'. EVERY single sentence in your response MUST end with an inline citation tag (e.g. [1], [2], or [3]) matching the Context Block index.\n"
+            f"3. You MUST include at least 3 distinct citation tags (from 3 different context blocks, e.g. [1], [2], [3]) in your response to answer the query comprehensively.\n"
+            f"4. For each citation tag used, include a record in the 'citations' list specifying:\n"
+            f"   - 'citation_tag': The tag used (e.g., '[1]')\n"
+            f"   - 'source_statement': The exact fact or claim in the response that uses this source\n"
+            f"   - 'source_block_index': The integer index (1-indexed) of the corresponding Context Block.\n\n"
+            f"JSON Format Example:\n"
+            f"{{\n"
+            f"  \"response\": \"Regional Rural Banks have a target of 75 percent for priority sector lending [1]. Within this target, agriculture loans must constitute at least 18 percent of advances [2]. Small and marginal farmers are allocated a sub-target of 10 percent [3].\",\n"
+            f"  \"citations\": [\n"
+            f"    {{ \"citation_tag\": \"[1]\", \"source_statement\": \"Regional Rural Banks have a target of 75 percent for priority sector lending\", \"source_block_index\": 1 }},\n"
+            f"    {{ \"citation_tag\": \"[2]\", \"source_statement\": \"agriculture loans must constitute at least 18 percent of advances\", \"source_block_index\": 2 }},\n"
+            f"    {{ \"citation_tag\": \"[3]\", \"source_statement\": \"Small and marginal farmers are allocated a sub-target of 10 percent\", \"source_block_index\": 3 }}\n"
+            f"  ]\n"
+            f"}}"
+        )
 
         payload = {
             "model": LLM_MODEL,

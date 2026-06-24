@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS chunks (
 CREATE_QUERY_LOGS_TABLE = """
 CREATE TABLE IF NOT EXISTS query_logs (
     log_id TEXT PRIMARY KEY,
+    user_identity TEXT,
     query_text TEXT NOT NULL,
     response_text TEXT NOT NULL,
     execution_time_ms REAL NOT NULL,
@@ -58,6 +59,14 @@ def init_db():
             conn.execute(CREATE_CHUNKS_TABLE)
             conn.execute(CREATE_QUERY_LOGS_TABLE)
             conn.execute(CREATE_SEMANTIC_CACHE_TABLE)
+            
+            # Migration to add user_identity column if it does not exist
+            cursor = conn.cursor()
+            cursor.execute("PRAGMA table_info(query_logs)")
+            columns = [row["name"] for row in cursor.fetchall()]
+            if "user_identity" not in columns:
+                print("Migrating query_logs table: adding user_identity column...")
+                conn.execute("ALTER TABLE query_logs ADD COLUMN user_identity TEXT")
         print("Database tables initialized successfully.")
     except Exception as e:
         print(f"Error initializing database: {e}")
