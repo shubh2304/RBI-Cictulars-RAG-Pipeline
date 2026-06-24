@@ -90,73 +90,163 @@ class LLMClient:
         # Format the contexts
         context_str = ""
         for idx, chunk in enumerate(retrieved_chunks):
-            doc_name = chunk["document_name"]
-            page = chunk["page_number"]
-            sec = chunk["section_title"] or "N/A"
-            ref = chunk["ref_number"] or "N/A"
-            context_str += f"--- CONTEXT BLOCK [{idx + 1}] ---\n"
-            context_str += f"Source: {doc_name} | Page: {page} | Section: {sec} | Ref: {ref}\n"
-            context_str += f"Content: {chunk['chunk_text']}\n"
-            context_str += "-------------------------\n\n"
+            circular_number = chunk.get("circular_number") or "N/A"
+            circular_title = chunk.get("document_name") or "N/A"
+            pub_date = chunk.get("pub_date") or "N/A"
+            page = chunk.get("page_number") or "N/A"
+            section = chunk.get("section_title") or "N/A"
+            source_url = chunk.get("source_url") or "N/A"
+            chunk_text = chunk.get("chunk_text") or ""
+
+            context_str += f"[{idx + 1}]\n"
+            context_str += f"Circular Number : {circular_number}\n"
+            context_str += f"Circular Title  : {circular_title}\n"
+            context_str += f"Date Issued     : {pub_date}\n"
+            context_str += f"Page            : {page}\n"
+            context_str += f"Section         : {section}\n"
+            context_str += f"Document URL    : {source_url}\n"
+            context_str += "----\n"
+            context_str += f"{chunk_text}\n\n"
 
         system_prompt = (
-            "You are an expert Reserve Bank of India (RBI) compliance officer. "
-            "Answer the query using ONLY the facts provided in the Context Blocks below. "
-            "Do not assume, extrapolate, or bring in outside knowledge. "
-            "Remember: The context may be silent on some aspects of the query. If the context does not explicitly mention "
-            "the answer to the query, you MUST answer: 'The provided documents do not contain information regarding [insert query topic].' "
-            "Do not speculate, extrapolate, or make up an answer.\n\n"
-            "CRITICAL INSTRUCTIONS:\n"
-            "1. Output your answer STRICTLY as a JSON object with two fields: 'response' and 'citations'. Do not use any other keys.\n"
-            "2. Write the answer inside 'response'. Every sentence in your response that makes factual claims from the context MUST end with an inline citation tag (e.g. [1], [2], or [3]). If you state that the information is not available, do NOT add any citation tags to that statement, and keep the 'citations' list empty.\n"
-            "3. Only cite context blocks that are directly relevant to the query. Do not force multiple citations if the context does not support them.\n"
-            "4. Keep factual details (limits, percentages, dates, and amounts) exactly as they are written in the context blocks to ensure accurate verification.\n"
-            "5. For each citation tag used, include a record in the 'citations' list specifying:\n"
-            "   - 'citation_tag': The tag used (e.g., '[1]')\n"
-            "   - 'source_statement': The exact fact or claim in the response that uses this source\n"
-            "   - 'source_block_index': The integer index (1-indexed) of the corresponding Context Block.\n\n"
-            "JSON Format Example (When answer is found):\n"
+            "===============================================================================\n"
+            "SYSTEM PROMPT\n"
+            "===============================================================================\n\n"
+            "You are a highly precise regulatory compliance assistant specializing exclusively\n"
+            "in Reserve Bank of India (RBI) circulars, notifications, master directions, and\n"
+            "guidelines.\n\n"
+            "Your sole knowledge source is the set of retrieved context blocks provided below.\n"
+            "You must never use any external knowledge, assumptions, or inference beyond what\n"
+            "is explicitly stated in those blocks.\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "CORE BEHAVIORAL RULES\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "RULE 1 — ANSWER ONLY FROM CONTEXT\n"
+            "  Use ONLY the text present in the provided context blocks [1] through [N].\n"
+            "  If the answer is not present, respond with the exact NOT_FOUND response\n"
+            "  defined at the end of this prompt. Never paraphrase knowledge not in the blocks.\n\n"
+            "RULE 2 — MANDATORY INLINE CITATION ON EVERY SENTENCE\n"
+            "  Every single sentence in your \"response\" field MUST end with one or more\n"
+            "  citation tags in the format [N], where N is the integer index of the context\n"
+            "  block that supports that sentence.\n"
+            "  Example: \"Banks must maintain an LCR of at least 100% at all times. [1]\"\n"
+            "  If one sentence draws from multiple blocks: \"... [1][3]\"\n"
+            "  A sentence without a citation tag is a critical violation.\n\n"
+            "RULE 3 — STRICT JSON OUTPUT ONLY\n"
+            "  Your entire output must be a single valid JSON object.\n"
+            "  - No preamble text before the JSON.\n"
+            "  - No explanation after the JSON.\n"
+            "  - No markdown code fences (no ```json).\n"
+            "  - No trailing commas.\n"
+            "  - All string values must use escaped quotes where necessary.\n\n"
+            "RULE 4 — HIGHLIGHT MUST BE VERBATIM\n"
+            "  The \"source_text\" field inside each citation's \"highlight\" object must be\n"
+            "  copied VERBATIM from the context block text. It is the exact substring of\n"
+            "  the chunk that most directly supports the cited sentence. Do not paraphrase\n"
+            "  or summarize it. Minimum 1 sentence, maximum 4 sentences from the chunk.\n\n"
+            "RULE 5 — NO HALLUCINATION OF METADATA\n"
+            "  circular_number, circular_title, date, page, section, and url must be copied\n"
+            "  EXACTLY as they appear in the context block header. Do not construct, guess,\n"
+            "  or modify any metadata field.\n\n"
+            "RULE 6 — DEDUPLICATION OF CITATIONS\n"
+            "  If the same context block [N] is cited by multiple sentences, it should appear\n"
+            "  only ONCE in the \"citations\" array. The \"statements\" field for that citation\n"
+            "  must be a list containing ALL sentences that drew from that block.\n\n"
+            "RULE 7 — CONFIDENCE SCORING\n"
+            "  For each citation, assign a \"confidence\" score between 0.0 and 1.0 indicating\n"
+            "  how directly the source_text supports the cited statement(s).\n"
+            "    1.0 = The chunk explicitly states the exact fact cited.\n"
+            "    0.7 = The chunk strongly implies the cited fact.\n"
+            "    0.5 = The chunk partially supports the cited fact.\n"
+            "  If confidence < 0.5 for any citation, do NOT include that citation or the\n"
+            "  sentence it supports in your response. Omit low-confidence claims entirely.\n\n"
+            "RULE 8 — CONFLICTING INFORMATION HANDLING\n"
+            "  If two context blocks contain contradictory information on the same point,\n"
+            "  report BOTH versions explicitly in your response, cite both blocks, and add\n"
+            "  a \"conflict\": true field to the relevant citation objects.\n\n"
+            "RULE 9 — REGULATORY LANGUAGE PRESERVATION\n"
+            "  When referencing specific limits, percentages, dates, thresholds, or defined\n"
+            "  terms from the circulars, reproduce them exactly as written in the source.\n"
+            "  Do not round, convert, or restate regulatory figures.\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "REQUIRED OUTPUT JSON SCHEMA\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             "{\n"
-            "  \"response\": \"Regional Rural Banks have a target of 75 percent for priority sector lending [1]. Within this target, agriculture loans must constitute at least 18 percent of advances [2]. Small and marginal farmers are allocated a sub-target of 10 percent [3].\",\n"
+            "  \"response\": \"<Full narrative answer. Every sentence ends with [N] tag(s).>\",\n\n"
             "  \"citations\": [\n"
-            "    { \"citation_tag\": \"[1]\", \"source_statement\": \"Regional Rural Banks have a target of 75 percent for priority sector lending\", \"source_block_index\": 1 },\n"
-            "    { \"citation_tag\": \"[2]\", \"source_statement\": \"agriculture loans must constitute at least 18 percent of advances\", \"source_block_index\": 2 },\n"
-            "    { \"citation_tag\": \"[3]\", \"source_statement\": \"Small and marginal farmers are allocated a sub-target of 10 percent\", \"source_block_index\": 3 }\n"
-            "  ]\n"
+            "    {\n"
+            "      \"tag\": \"[1]\",\n"
+            "      \"context_index\": 1,\n"
+            "      \"confidence\": 0.95,\n"
+            "      \"conflict\": false,\n"
+            "      \"statements\": [\n"
+            "        \"<Sentence 1 from response that cited block 1, without the [1] tag>\",\n"
+            "        \"<Sentence 2 from response that also cited block 1, if any>\"\n"
+            "      ],\n"
+            "      \"highlight\": {\n"
+            "        \"source_text\": \"<Verbatim excerpt from block 1 that supports the statements above>\",\n"
+            "        \"circular_number\": \"<Copied exactly from block 1 header>\",\n"
+            "        \"circular_title\": \"<Copied exactly from block 1 header>\",\n"
+            "        \"date\": \"<Copied exactly from block 1 header>\",\n"
+            "        \"page\": \"<Copied exactly from block 1 header>\",\n"
+            "        \"section\": \"<Copied exactly from block 1 header>\",\n"
+            "        \"url\": \"<Copied exactly from block 1 header>\"\n"
+            "      }\n"
+            "    }\n"
+            "    // ... one object per UNIQUE context block cited\n"
+            "  ],\n\n"
+            "  \"answer_status\": \"ANSWERED\" | \"PARTIAL\" | \"NOT_FOUND\",\n\n"
+            "  \"blocks_used\": [1, 3],\n\n"
+            "  \"blocks_unused\": [2, 4, 5]\n"
             "}\n\n"
-            "JSON Format Example (When answer is NOT found):\n"
+            "FIELD DEFINITIONS:\n"
+            "  response        → Full answer string with inline [N] tags after every sentence.\n"
+            "  citations       → Array of citation objects, one per unique block cited.\n"
+            "  tag             → String like \"[1]\", \"[2]\" matching the inline tag used.\n"
+            "  context_index   → Integer index of the block (same as the number inside tag).\n"
+            "  confidence      → Float 0.0–1.0. Omit citation if < 0.5.\n"
+            "  conflict        → Boolean. true only if this block contradicts another cited block.\n"
+            "  statements      → List of ALL sentences in response that drew from this block.\n"
+            "  highlight       → Object containing verbatim excerpt + full source metadata.\n"
+            "  source_text     → Verbatim substring from the chunk. 1–4 sentences max.\n"
+            "  circular_number → e.g. \"RBI/2024-25/67\" — copied from block header.\n"
+            "  circular_title  → e.g. \"Master Direction on KYC\" — copied from block header.\n"
+            "  date            → e.g. \"2024-09-12\" — copied from block header.\n"
+            "  page            → e.g. \"4\" or \"4-5\" — copied from block header.\n"
+            "  section         → e.g. \"Section 3.2\" or \"Para 7\" — copied from block header.\n"
+            "  url             → Full RBI URL — copied from block header.\n"
+            "  answer_status   → \"ANSWERED\" if fully answered, \"PARTIAL\" if some parts missing,\n"
+            "                    \"NOT_FOUND\" if no relevant content found at all.\n"
+            "  blocks_used     → List of integer indices of blocks that contributed to answer.\n"
+            "  blocks_unused   → List of integer indices of blocks retrieved but not cited.\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "NOT_FOUND RESPONSE (use this verbatim when RULE 1 applies)\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             "{\n"
-            "  \"response\": \"The provided documents do not contain information regarding whether a customer can use PM-KISAN money as proof of income.\",\n"
-            "  \"citations\": []\n"
+            "  \"response\": \"The retrieved RBI circulars do not contain sufficient information to answer this question.\",\n"
+            "  \"citations\": [],\n"
+            "  \"answer_status\": \"NOT_FOUND\",\n"
+            "  \"blocks_used\": [],\n"
+            "  \"blocks_unused\": [1, 2, 3, 4, 5]\n"
             "}"
         )
 
         user_prompt = (
-            f"Context Blocks:\n{context_str}\n\n"
-            f"Query: {query}\n\n"
-            f"CRITICAL INSTRUCTIONS:\n"
-            f"1. Output your answer STRICTLY as a JSON object with two fields: 'response' and 'citations'. Do not use any other keys.\n"
-            f"2. Write the answer inside 'response'. Every sentence in your response that makes factual claims from the context MUST end with an inline citation tag (e.g. [1], [2], or [3]). If you state that the information is not available, do NOT add any citation tags to that statement, and keep the 'citations' list empty.\n"
-            f"3. Only cite context blocks that are directly relevant to the query. Do not force multiple citations if the context does not support them.\n"
-            f"4. Keep factual details (limits, percentages, dates, and amounts) exactly as they are written in the context blocks to ensure accurate verification.\n"
-            f"5. For each citation tag used, include a record in the 'citations' list specifying:\n"
-            f"   - 'citation_tag': The tag used (e.g., '[1]')\n"
-            f"   - 'source_statement': The exact fact or claim in the response that uses this source\n"
-            f"   - 'source_block_index': The integer index (1-indexed) of the corresponding Context Block.\n\n"
-            f"JSON Format Example (When answer is found):\n"
-            f"{{\n"
-            f"  \"response\": \"Regional Rural Banks have a target of 75 percent for priority sector lending [1]. Within this target, agriculture loans must constitute at least 18 percent of advances [2]. Small and marginal farmers are allocated a sub-target of 10 percent [3].\",\n"
-            f"  \"citations\": [\n"
-            f"    {{ \"citation_tag\": \"[1]\", \"source_statement\": \"Regional Rural Banks have a target of 75 percent for priority sector lending\", \"source_block_index\": 1 }},\n"
-            f"    {{ \"citation_tag\": \"[2]\", \"source_statement\": \"agriculture loans must constitute at least 18 percent of advances\", \"source_block_index\": 2 }},\n"
-            f"    {{ \"citation_tag\": \"[3]\", \"source_statement\": \"Small and marginal farmers are allocated a sub-target of 10 percent\", \"source_block_index\": 3 }}\n"
-            f"  ]\n"
-            f"}}\n\n"
-            f"JSON Format Example (When answer is NOT found):\n"
-            f"{{\n"
-            f"  \"response\": \"The provided documents do not contain information regarding whether a customer can use PM-KISAN money as proof of income.\",\n"
-            f"  \"citations\": []\n"
-            f"}}"
+            "===============================================================================\n"
+            "USER PROMPT\n"
+            "===============================================================================\n\n"
+            "--- RETRIEVED CONTEXT BLOCKS ---\n\n"
+            f"{context_str}\n"
+            "--- USER QUESTION ---\n\n"
+            f"{query}\n\n\n"
+            "--- REMINDER BEFORE YOU OUTPUT ---\n\n"
+            "□ Does every sentence in \"response\" end with a [N] citation tag?\n"
+            "□ Is \"source_text\" in every highlight copied verbatim from the block text?\n"
+            "□ Are all metadata fields (url, circular_number, etc.) copied from block headers?\n"
+            "□ Is the output a single raw JSON object with no markdown fences or preamble?\n"
+            "□ Are all citations with confidence < 0.5 excluded?\n"
+            "□ Is \"answer_status\" correctly set to ANSWERED / PARTIAL / NOT_FOUND?\n\n"
+            "Output only the JSON object now."
         )
 
         payload = {
@@ -204,23 +294,49 @@ class LLMClient:
         """Generates a structured mock response for offline/testing fallback."""
         if not chunks:
             return {
-                "response": "No relevant RBI documents were found to answer this question.",
-                "citations": []
+                "response": "The retrieved RBI circulars do not contain sufficient information to answer this question.",
+                "citations": [],
+                "answer_status": "NOT_FOUND",
+                "blocks_used": [],
+                "blocks_unused": [1, 2, 3, 4, 5]
             }
             
-        doc_name = chunks[0]["document_name"]
-        page = chunks[0]["page_number"]
-        sec = chunks[0]["section_title"] or "N/A"
+        chunk = chunks[0]
+        circular_number = chunk.get("circular_number") or "N/A"
+        circular_title = chunk.get("document_name") or "N/A"
+        pub_date = chunk.get("pub_date") or "N/A"
+        page = chunk.get("page_number") or "N/A"
+        section = chunk.get("section_title") or "N/A"
+        source_url = chunk.get("source_url") or "N/A"
+        chunk_text = chunk.get("chunk_text") or ""
+        
+        statement = f"Based on the guidelines, the regulation states that: {chunk_text[:150]}"
         
         return {
-            "response": f"[MOCK ANSWER] Based on {doc_name}, Page {page}, Section {sec}, the regulation states that: {chunks[0]['chunk_text'][:200]}... [1]",
+            "response": f"{statement} [1]",
             "citations": [
                 {
-                    "citation_tag": "[1]",
-                    "source_statement": f"Based on {doc_name}, the regulation states that: {chunks[0]['chunk_text'][:100]}",
-                    "source_block_index": 1
+                    "tag": "[1]",
+                    "context_index": 1,
+                    "confidence": 1.0,
+                    "conflict": false,
+                    "statements": [
+                        statement
+                    ],
+                    "highlight": {
+                        "source_text": chunk_text[:200],
+                        "circular_number": circular_number,
+                        "circular_title": circular_title,
+                        "date": pub_date,
+                        "page": str(page),
+                        "section": section,
+                        "url": source_url
+                    }
                 }
-            ]
+            ],
+            "answer_status": "ANSWERED",
+            "blocks_used": [1],
+            "blocks_unused": [i + 2 for i in range(len(chunks) - 1)]
         }
 
 if __name__ == "__main__":

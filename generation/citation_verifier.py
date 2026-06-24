@@ -152,6 +152,11 @@ class CitationVerifier:
         and adds rich metadata to verified citations.
         """
         response_text = llm_response.get("response", "")
+        answer_status = llm_response.get("answer_status")
+        
+        # If the LLM declared the answer is NOT_FOUND, ensure we use the standard NOT_FOUND text
+        if answer_status == "NOT_FOUND":
+            response_text = "The retrieved RBI circulars do not contain sufficient information to answer this question."
         
         # Robust recovery logic for response text if the model returned non-standard JSON keys
         if not response_text:
@@ -189,16 +194,54 @@ class CitationVerifier:
                                 idx_match = re.search(r'\b(\d+)\b', item)
                                 block_idx = int(idx_match.group(1)) if idx_match else 1
                                 citations.append({
-                                    "citation_tag": tag,
-                                    "source_statement": item,
-                                    "source_block_index": block_idx
+                                    "tag": tag,
+                                    "statements": [item],
+                                    "context_index": block_idx
                                 })
                     break
+        
+        normalized_citations = []
+        for cit in citations:
+            if not isinstance(cit, dict):
+                continue
+                
+            # Extract tag
+            tag = cit.get("tag") or cit.get("citation_tag")
+            # Extract block index
+            block_idx = cit.get("context_index") or cit.get("source_block_index")
+            # Filter low-confidence claims if confidence is below 0.5
+            confidence = cit.get("confidence", 1.0)
+            if confidence is not None:
+                try:
+                    if float(confidence) < 0.5:
+                        continue
+                except (ValueError, TypeError):
+                    pass
+                    
+            # Extract statements (can be a list in the new schema, or a single string in the old schema)
+            statements = []
+            if "statements" in cit:
+                stmts = cit["statements"]
+                if isinstance(stmts, list):
+                    statements.extend([s for s in stmts if isinstance(s, str)])
+                elif isinstance(stmts, str):
+                    statements.append(stmts)
+            elif "source_statement" in cit:
+                stmt = cit["source_statement"]
+                if isinstance(stmt, str):
+                    statements.append(stmt)
+                    
+            for stmt in statements:
+                normalized_citations.append({
+                    "citation_tag": tag,
+                    "source_statement": stmt,
+                    "source_block_index": block_idx
+                })
         
         verified_citations = []
         hallucination_warnings = []
         
-        for cit in citations:
+        for cit in normalized_citations:
             tag = cit.get("citation_tag")
             statement = cit.get("source_statement", "")
             block_idx = cit.get("source_block_index")
