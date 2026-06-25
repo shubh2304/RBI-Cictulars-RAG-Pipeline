@@ -6,7 +6,7 @@ This document provides a comprehensive, first-principles explanation of the **Re
 
 ## 1. High-Level Architectural Flow
 
-The RAG pipeline is divided into three core cycles—**Ingestion**, **Retrieval**, and **Generation**—complemented by a static/runtime **Security Control** layer.
+The RAG pipeline is divided into three core cycles—**Ingestion**, **Retrieval**, and **Generation**—complemented by a static/runtime **Security Control** layer, all connected to an interactive **Next.js Web Client**.
 
 ```mermaid
 graph TD
@@ -48,10 +48,21 @@ graph TD
         Format --> Output["attributable, Verified Response"]
         Format --> Audit["Query Logs & Audit Trail Logging"]
     end
+
+    %% Next.js Web Interface Layer
+    subgraph WebClient ["4. NEXT.JS INTERACTIVE UI"]
+        UI[Next.js App Router Page] -->|POST /api/query| API[FastAPI Server]
+        API -->|Fetch PDF Streams| Viewer[Iframe PDF Viewer]
+        UI -->|Select Citations / View Source Page| Viewer
+    end
+
+    Output --> UI
+    Viewer --> UI
     
     style Ingestion fill:#f5faff,stroke:#005EA6,stroke-width:2px;
     style Retrieval fill:#fafffa,stroke:#008A00,stroke-width:2px;
     style GenSec fill:#fffbf5,stroke:#D06B00,stroke-width:2px;
+    style WebClient fill:#fdf5ff,stroke:#8A008A,stroke-width:2px;
 ```
 
 ---
@@ -107,7 +118,7 @@ Retrieval combines keyword accuracy (Sparse) and conceptual match (Dense) in par
     └──► BGE Embedding ──► FAISS Index (IndexFlatIP) ────► [Top 50 Dense List]  ──┼──► Reciprocal Rank Fusion (RRF)
                                                                                   │
                                                                                   ▼
-                                                                           [Top 15 merged]
+                                                                           [Top 30 merged]
                                                                                   │
                                                                                   ▼
                                                                            Cross-Encoder
@@ -133,7 +144,7 @@ Retrieval combines keyword accuracy (Sparse) and conceptual match (Dense) in par
 To combine the different scoring scales of BM25 (arbitrary floats) and FAISS (0.0 to 1.0 cosines), the system merges the lists by rank using RRF:
 $$RRF\_Score(d \in D) = \sum_{m \in M} \frac{1}{k + r_m(d)}$$
 Where $M$ is the set of retrievers (BM25 and FAISS), $r_m(d)$ is the rank of document $d$ in retriever $m$, and $k$ is a smoothing constant (set to `60`).
-* The top **15 chunks** with the highest RRF scores are retained.
+* The top **30 chunks** with the highest RRF scores are retained.
 
 ### Step 4: Cross-Encoder Reranking
 Bi-encoders (FAISS and BM25) embed queries and documents independently. To compute exact token-level attention, we concatenate the strings: `[Query, Chunk Text]` and pass them to the Cross-Encoder (`bge-reranker-base`).

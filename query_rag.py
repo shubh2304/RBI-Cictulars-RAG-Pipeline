@@ -19,6 +19,8 @@ def sanitize_text(text):
     """Sanitizes text for safe terminal printing on Windows CP1252/ASCII consoles."""
     if not text:
         return ""
+    # Replace carriage returns and newlines to prevent terminal line overwrites
+    text = text.replace('\r', ' ').replace('\n', ' ')
     # Map common unicode characters to clean equivalents
     text = text.replace('\u201c', '"').replace('\u201d', '"')
     text = text.replace('\u2018', "'").replace('\u2019', "'")
@@ -36,7 +38,7 @@ def query_system(query_text, top_k=5):
     # 1. Initialize Hybrid Search
     print("[1/4] Running Hybrid Retrieval (BM25 + FAISS)...")
     hybrid = HybridRetriever()
-    candidates = hybrid.search(query_text, top_k=15)
+    candidates = hybrid.search(query_text, top_k=30)
     
     if not candidates:
         print("No matches found in the corpus.")

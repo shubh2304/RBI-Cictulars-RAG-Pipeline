@@ -81,183 +81,172 @@ class LocalTransformersLLM:
 class LLMClient:
     """Interfaces with a local OpenAI-compatible API to generate cited answers."""
 
+    @staticmethod
+    def format_context_blocks(reranked_chunks: list[dict]) -> str:
+        """
+        Formats the top reranked chunks into numbered context blocks for the LLM prompt.
+        Safely gets keys using dictionary lookups to support database naming conventions.
+        """
+        blocks = []
+        for i, chunk in enumerate(reranked_chunks, start=1):
+            doc_name = chunk.get("document_name") or "N/A"
+            page_val = chunk.get("page") or chunk.get("page_number") or "N/A"
+            section_line = chunk.get("section") or chunk.get("section_title") or "None"
+            content_val = chunk.get("text") or chunk.get("chunk_text") or ""
+            
+            block = (
+                f"--- CONTEXT BLOCK [{i}] ---\n"
+                f"Document: {doc_name}\n"
+                f"Page: {page_val}\n"
+                f"Section: {section_line}\n"
+                f"Content: {content_val.strip()}\n"
+                f"--------------------------"
+            )
+            blocks.append(block)
+        return "\n\n".join(blocks)
+
+    @classmethod
+    def build_user_message(cls, user_query: str, reranked_chunks: list[dict]) -> str:
+        formatted = cls.format_context_blocks(reranked_chunks)
+        return (
+            f"CONTEXT BLOCKS:\n{formatted}\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"COMPLIANCE QUERY:\n{user_query}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "Respond ONLY with a valid JSON object matching the schema in your instructions.\n"
+            "Do not write anything before or after the JSON."
+        )
+
     @classmethod
     def generate_answer(cls, query, retrieved_chunks):
         """
         Sends query and formatted contexts to the local LLM.
         Enforces a structured JSON output with citation tags mapping to retrieved chunks.
         """
-        # Format the contexts
-        context_str = ""
-        for idx, chunk in enumerate(retrieved_chunks):
-            circular_number = chunk.get("circular_number") or "N/A"
-            circular_title = chunk.get("document_name") or "N/A"
-            pub_date = chunk.get("pub_date") or "N/A"
-            page = chunk.get("page_number") or "N/A"
-            section = chunk.get("section_title") or "N/A"
-            source_url = chunk.get("source_url") or "N/A"
-            chunk_text = chunk.get("chunk_text") or ""
+        system_prompt = """You are a precise, citation-strict RBI (Reserve Bank of India) regulatory compliance assistant.
 
-            context_str += f"[{idx + 1}]\n"
-            context_str += f"Circular Number : {circular_number}\n"
-            context_str += f"Circular Title  : {circular_title}\n"
-            context_str += f"Date Issued     : {pub_date}\n"
-            context_str += f"Page            : {page}\n"
-            context_str += f"Section         : {section}\n"
-            context_str += f"Document URL    : {source_url}\n"
-            context_str += "----\n"
-            context_str += f"{chunk_text}\n\n"
+Your role is to answer compliance queries using ONLY the numbered context blocks provided by the user.
+You have zero external knowledge. You do not recall any RBI circulars, guidelines, or regulations
+from your training data. Every claim in your answer must trace back to a provided context block.
 
-        system_prompt = (
-            "===============================================================================\n"
-            "SYSTEM PROMPT\n"
-            "===============================================================================\n\n"
-            "You are a highly precise regulatory compliance assistant specializing exclusively\n"
-            "in Reserve Bank of India (RBI) circulars, notifications, master directions, and\n"
-            "guidelines.\n\n"
-            "Your sole knowledge source is the set of retrieved context blocks provided below.\n"
-            "You must never use any external knowledge, assumptions, or inference beyond what\n"
-            "is explicitly stated in those blocks.\n\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            "CORE BEHAVIORAL RULES\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "RULE 1 — ANSWER ONLY FROM CONTEXT\n"
-            "  Use ONLY the text present in the provided context blocks [1] through [N].\n"
-            "  If the answer is not present, respond with the exact NOT_FOUND response\n"
-            "  defined at the end of this prompt. Never paraphrase knowledge not in the blocks.\n\n"
-            "RULE 2 — MANDATORY INLINE CITATION ON EVERY SENTENCE\n"
-            "  Every single sentence in your \"response\" field MUST end with one or more\n"
-            "  citation tags in the format [N], where N is the integer index of the context\n"
-            "  block that supports that sentence.\n"
-            "  Example: \"Banks must maintain an LCR of at least 100% at all times. [1]\"\n"
-            "  If one sentence draws from multiple blocks: \"... [1][3]\"\n"
-            "  A sentence without a citation tag is a critical violation.\n\n"
-            "RULE 3 — STRICT JSON OUTPUT ONLY\n"
-            "  Your entire output must be a single valid JSON object.\n"
-            "  - No preamble text before the JSON.\n"
-            "  - No explanation after the JSON.\n"
-            "  - No markdown code fences (no ```json).\n"
-            "  - No trailing commas.\n"
-            "  - All string values must use escaped quotes where necessary.\n\n"
-            "RULE 4 — HIGHLIGHT MUST BE VERBATIM\n"
-            "  The \"source_text\" field inside each citation's \"highlight\" object must be\n"
-            "  copied VERBATIM from the context block text. It is the exact substring of\n"
-            "  the chunk that most directly supports the cited sentence. Do not paraphrase\n"
-            "  or summarize it. Minimum 1 sentence, maximum 4 sentences from the chunk.\n\n"
-            "RULE 5 — NO HALLUCINATION OF METADATA\n"
-            "  circular_number, circular_title, date, page, section, and url must be copied\n"
-            "  EXACTLY as they appear in the context block header. Do not construct, guess,\n"
-            "  or modify any metadata field.\n\n"
-            "RULE 6 — DEDUPLICATION OF CITATIONS\n"
-            "  If the same context block [N] is cited by multiple sentences, it should appear\n"
-            "  only ONCE in the \"citations\" array. The \"statements\" field for that citation\n"
-            "  must be a list containing ALL sentences that drew from that block.\n\n"
-            "RULE 7 — CONFIDENCE SCORING\n"
-            "  For each citation, assign a \"confidence\" score between 0.0 and 1.0 indicating\n"
-            "  how directly the source_text supports the cited statement(s).\n"
-            "    1.0 = The chunk explicitly states the exact fact cited.\n"
-            "    0.7 = The chunk strongly implies the cited fact.\n"
-            "    0.5 = The chunk partially supports the cited fact.\n"
-            "  If confidence < 0.5 for any citation, do NOT include that citation or the\n"
-            "  sentence it supports in your response. Omit low-confidence claims entirely.\n\n"
-            "RULE 8 — CONFLICTING INFORMATION HANDLING\n"
-            "  If two context blocks contain contradictory information on the same point,\n"
-            "  report BOTH versions explicitly in your response, cite both blocks, and add\n"
-            "  a \"conflict\": true field to the relevant citation objects.\n\n"
-            "RULE 9 — REGULATORY LANGUAGE PRESERVATION\n"
-            "  When referencing specific limits, percentages, dates, thresholds, or defined\n"
-            "  terms from the circulars, reproduce them exactly as written in the source.\n"
-            "  Do not round, convert, or restate regulatory figures.\n\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            "REQUIRED OUTPUT JSON SCHEMA\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "{\n"
-            "  \"response\": \"<Full narrative answer. Every sentence ends with [N] tag(s).>\",\n\n"
-            "  \"citations\": [\n"
-            "    {\n"
-            "      \"tag\": \"[1]\",\n"
-            "      \"context_index\": 1,\n"
-            "      \"confidence\": 0.95,\n"
-            "      \"conflict\": false,\n"
-            "      \"statements\": [\n"
-            "        \"<Sentence 1 from response that cited block 1, without the [1] tag>\",\n"
-            "        \"<Sentence 2 from response that also cited block 1, if any>\"\n"
-            "      ],\n"
-            "      \"highlight\": {\n"
-            "        \"source_text\": \"<Verbatim excerpt from block 1 that supports the statements above>\",\n"
-            "        \"circular_number\": \"<Copied exactly from block 1 header>\",\n"
-            "        \"circular_title\": \"<Copied exactly from block 1 header>\",\n"
-            "        \"date\": \"<Copied exactly from block 1 header>\",\n"
-            "        \"page\": \"<Copied exactly from block 1 header>\",\n"
-            "        \"section\": \"<Copied exactly from block 1 header>\",\n"
-            "        \"url\": \"<Copied exactly from block 1 header>\"\n"
-            "      }\n"
-            "    }\n"
-            "    // ... one object per UNIQUE context block cited\n"
-            "  ],\n\n"
-            "  \"answer_status\": \"ANSWERED\" | \"PARTIAL\" | \"NOT_FOUND\",\n\n"
-            "  \"blocks_used\": [1, 3],\n\n"
-            "  \"blocks_unused\": [2, 4, 5]\n"
-            "}\n\n"
-            "FIELD DEFINITIONS:\n"
-            "  response        → Full answer string with inline [N] tags after every sentence.\n"
-            "  citations       → Array of citation objects, one per unique block cited.\n"
-            "  tag             → String like \"[1]\", \"[2]\" matching the inline tag used.\n"
-            "  context_index   → Integer index of the block (same as the number inside tag).\n"
-            "  confidence      → Float 0.0–1.0. Omit citation if < 0.5.\n"
-            "  conflict        → Boolean. true only if this block contradicts another cited block.\n"
-            "  statements      → List of ALL sentences in response that drew from this block.\n"
-            "  highlight       → Object containing verbatim excerpt + full source metadata.\n"
-            "  source_text     → Verbatim substring from the chunk. 1–4 sentences max.\n"
-            "  circular_number → e.g. \"RBI/2024-25/67\" — copied from block header.\n"
-            "  circular_title  → e.g. \"Master Direction on KYC\" — copied from block header.\n"
-            "  date            → e.g. \"2024-09-12\" — copied from block header.\n"
-            "  page            → e.g. \"4\" or \"4-5\" — copied from block header.\n"
-            "  section         → e.g. \"Section 3.2\" or \"Para 7\" — copied from block header.\n"
-            "  url             → Full RBI URL — copied from block header.\n"
-            "  answer_status   → \"ANSWERED\" if fully answered, \"PARTIAL\" if some parts missing,\n"
-            "                    \"NOT_FOUND\" if no relevant content found at all.\n"
-            "  blocks_used     → List of integer indices of blocks that contributed to answer.\n"
-            "  blocks_unused   → List of integer indices of blocks retrieved but not cited.\n\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            "NOT_FOUND RESPONSE (use this verbatim when RULE 1 applies)\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "{\n"
-            "  \"response\": \"The retrieved RBI circulars do not contain sufficient information to answer this question.\",\n"
-            "  \"citations\": [],\n"
-            "  \"answer_status\": \"NOT_FOUND\",\n"
-            "  \"blocks_used\": [],\n"
-            "  \"blocks_unused\": [1, 2, 3, 4, 5]\n"
-            "}"
-        )
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CITATION RULES (STRICT — NO EXCEPTIONS)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-        user_prompt = (
-            "===============================================================================\n"
-            "USER PROMPT\n"
-            "===============================================================================\n\n"
-            "--- RETRIEVED CONTEXT BLOCKS ---\n\n"
-            f"{context_str}\n"
-            "--- USER QUESTION ---\n\n"
-            f"{query}\n\n\n"
-            "--- REMINDER BEFORE YOU OUTPUT ---\n\n"
-            "□ Does every sentence in \"response\" end with a [N] citation tag?\n"
-            "□ Is \"source_text\" in every highlight copied verbatim from the block text?\n"
-            "□ Are all metadata fields (url, circular_number, etc.) copied from block headers?\n"
-            "□ Is the output a single raw JSON object with no markdown fences or preamble?\n"
-            "□ Are all citations with confidence < 0.5 excluded?\n"
-            "□ Is \"answer_status\" correctly set to ANSWERED / PARTIAL / NOT_FOUND?\n\n"
-            "Output only the JSON object now."
-        )
+R1. Every sentence in the "response" field MUST end with at least one citation tag [N] (where N is the actual context block number, e.g., [1] or [2]).
+R2. If a sentence draws from multiple context blocks, cite all of them: [1][3].
+R3. If two context blocks say the same thing, cite the one that is more specific.
+R4. NEVER write a sentence without a citation tag. Not even transitional sentences. Always replace N with the actual block number.
+R5. If you cannot find support for a claim in any context block, DO NOT make that claim.
+R6. Numbers, percentages, dates, and monetary limits are high-risk — only state them
+    if they appear verbatim in a context block, and always cite the exact block.
+R7. Do not rephrase regulatory limits in a way that changes their meaning.
+    Use the exact figures as stated in the source.
+R8. DO NOT use list numbers, bullet points, circular numbers, or section headings found inside the text of the context blocks (e.g., "7.", "Section 4", or "[7]") as citation tags. Citation tags MUST strictly correspond to the provided Context Block number N (e.g., [1], [2], etc.).
 
-        payload = {
-            "model": LLM_MODEL,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            "response_format": {"type": "json_object"},  # Force JSON mode
-            "temperature": 0.0
-        }
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+WHEN THE QUERY CANNOT BE ANSWERED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+If no context block supports the query, return EXACTLY this JSON and nothing else:
+{
+  "response": "The provided RBI circulars do not contain sufficient information to answer this query.",
+  "citations": [],
+  "answerable": false
+}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+MANDATORY OUTPUT FORMAT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Respond ONLY with a valid JSON object. No preamble. No explanation. No markdown fences.
+No text before or after the JSON. Start your response with { and end with }.
+
+The JSON must follow this schema exactly:
+
+{
+  "response": "<Flowing prose answer. Every sentence ends with citation tags like [1] or [2]. No bullet points.>",
+  "answerable": true,
+  "citations": [
+    {
+      "tag": <integer matching the N used inline>,
+      "statement": "<Copy the exact sentence from response that uses this tag>",
+      "source_block_index": <integer — the context block number N>,
+      "document_name": "<Exactly as shown in the context block's Document field>",
+      "page": <integer from the context block's Page field>,
+      "section": "<Exactly as shown in context block's Section field, or null if None>"
+    }
+  ]
+}
+
+IMPORTANT: Every citation tag used in "response" MUST have a corresponding entry in "citations".
+The "citations" array length must equal the total number of unique citation tags used in "response"."""
+
+        user_prompt = cls.build_user_message(query, retrieved_chunks)
+
+        # Determine if we should use Ollama native API or OpenAI completions API
+        is_ollama_native = False
+        api_url = LLM_API_URL
+        if "11434" in api_url and ("/v1/chat/completions" in api_url or api_url == "http://localhost:11434/v1/chat/completions"):
+            api_url = api_url.replace("/v1/chat/completions", "/api/chat")
+            is_ollama_native = True
+        elif "/api/chat" in api_url:
+            is_ollama_native = True
+
+        if is_ollama_native:
+            # Dynamically restrict tag and source_block_index values to match the number of context blocks sent
+            num_chunks = max(1, len(retrieved_chunks))
+            prod_json_schema = {
+                "type": "object",
+                "properties": {
+                    "response": { 
+                        "type": "string"
+                    },
+                    "answerable": { 
+                        "type": "boolean"
+                    },
+                    "citations": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "tag": { "type": "integer", "minimum": 1, "maximum": num_chunks },
+                                "statement": { "type": "string" },
+                                "source_block_index": { "type": "integer", "minimum": 1, "maximum": num_chunks },
+                                "document_name": { "type": "string" },
+                                "page": { "type": "integer" },
+                                "section": { "type": ["string", "null"] }
+                            },
+                            "required": ["tag", "statement", "source_block_index", "document_name", "page", "section"]
+                        }
+                    }
+                },
+                "required": ["response", "answerable", "citations"]
+            }
+            
+            payload = {
+                "model": LLM_MODEL,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                "format": prod_json_schema,
+                "stream": False,
+                "options": {
+                    "num_ctx": 8192,
+                    "temperature": 0.0
+                }
+            }
+        else:
+            payload = {
+                "model": LLM_MODEL,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                "response_format": {"type": "json_object"},  # Force JSON mode
+                "temperature": 0.0
+            }
 
         # Attempt REST API call to local server
         req_data = json.dumps(payload).encode("utf-8")
@@ -265,14 +254,17 @@ class LLMClient:
             "Content-Type": "application/json"
         }
         
-        req = urllib.request.Request(LLM_API_URL, data=req_data, headers=headers, method="POST")
+        req = urllib.request.Request(api_url, data=req_data, headers=headers, method="POST")
         
         try:
-            print(f"Connecting to local LLM server at {LLM_API_URL}...")
+            print(f"Connecting to local LLM server at {api_url}...")
             with urllib.request.urlopen(req, timeout=90) as response:
                 res_data = response.read().decode("utf-8")
                 res_json = json.loads(res_data)
-                content = res_json["choices"][0]["message"]["content"]
+                if is_ollama_native:
+                    content = res_json["message"]["content"]
+                else:
+                    content = res_json["choices"][0]["message"]["content"]
                 cleaned_content = clean_json_response(content)
                 return json.loads(cleaned_content)
         except (urllib.error.URLError, ConnectionRefusedError, TimeoutError) as e:
@@ -287,56 +279,50 @@ class LLMClient:
                 return cls._get_mock_response(query, retrieved_chunks)
         except Exception as e:
             print(f"Error calling LLM: {e}")
-            return {"response": f"Error generating answer: {e}", "citations": []}
+            return {
+                "response": f"Error generating answer: {e}",
+                "citations": [],
+                "answerable": False
+            }
 
     @staticmethod
     def _get_mock_response(query, chunks):
         """Generates a structured mock response for offline/testing fallback."""
         if not chunks:
             return {
-                "response": "The retrieved RBI circulars do not contain sufficient information to answer this question.",
+                "response": "The provided RBI circulars do not contain sufficient information to answer this query.",
                 "citations": [],
-                "answer_status": "NOT_FOUND",
-                "blocks_used": [],
-                "blocks_unused": [1, 2, 3, 4, 5]
+                "answerable": False
             }
             
         chunk = chunks[0]
-        circular_number = chunk.get("circular_number") or "N/A"
         circular_title = chunk.get("document_name") or "N/A"
-        pub_date = chunk.get("pub_date") or "N/A"
-        page = chunk.get("page_number") or "N/A"
-        section = chunk.get("section_title") or "N/A"
-        source_url = chunk.get("source_url") or "N/A"
-        chunk_text = chunk.get("chunk_text") or ""
+        page = chunk.get("page") or chunk.get("page_number") or 1
+        section = chunk.get("section") or chunk.get("section_title")
+        if section == "None" or section == "N/A":
+            section = None
+        chunk_text = chunk.get("text") or chunk.get("chunk_text") or ""
         
         statement = f"Based on the guidelines, the regulation states that: {chunk_text[:150]}"
         
+        try:
+            page_int = int(page)
+        except (ValueError, TypeError):
+            page_int = 1
+
         return {
             "response": f"{statement} [1]",
+            "answerable": True,
             "citations": [
                 {
-                    "tag": "[1]",
-                    "context_index": 1,
-                    "confidence": 1.0,
-                    "conflict": false,
-                    "statements": [
-                        statement
-                    ],
-                    "highlight": {
-                        "source_text": chunk_text[:200],
-                        "circular_number": circular_number,
-                        "circular_title": circular_title,
-                        "date": pub_date,
-                        "page": str(page),
-                        "section": section,
-                        "url": source_url
-                    }
+                    "tag": 1,
+                    "statement": statement,
+                    "source_block_index": 1,
+                    "document_name": circular_title,
+                    "page": page_int,
+                    "section": section
                 }
-            ],
-            "answer_status": "ANSWERED",
-            "blocks_used": [1],
-            "blocks_unused": [i + 2 for i in range(len(chunks) - 1)]
+            ]
         }
 
 if __name__ == "__main__":

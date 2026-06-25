@@ -1,0 +1,30 @@
+{
+  "response": "All collateral-free loans to individual/s belonging to low-income households, i.e., households having annual income up to ₹3,00,000 are treated as microfinance loans [1].",
+
+  "citations": [
+    {
+      "tag": "[1]",
+      "context_index": 1,
+      "confidence": 0.95,
+      "conflict": false,
+      "statements": [
+        "All collateral-free loans to individual/s belonging to low-income households, i.e., households having annual income up to ₹3,00,000 are treated as microfinance loans."
+      ],
+      "highlight": {
+        "source_text": "Q 3. Whether loans for consumption (i.e., for buying gadgets, meeting expenses on ceremonies, etc.) without collateral would be treated as microfinance loans? Ans. All collateral-free loans to individual/s belonging to low-income households, i.e., households having annual income up to ₹3,00,000 are treated as microfinance loans.",
+        "circular_number": "N/A",
+        "circular_title": "RFML30012025",
+        "date": "July 25, 2022",
+        "page": "1",
+        "section": "N/A",
+        "url": "N/A"
+      }
+    }
+  ],
+
+  "answer_status": "ANSWERED",
+
+  "blocks_used": [1],
+
+  "blocks_unused": [2, 3, 4, 5]
+}

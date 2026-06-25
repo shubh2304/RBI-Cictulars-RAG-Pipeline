@@ -107,8 +107,8 @@ def run_evaluation():
         expected_file = qa["expected_filename"]
         
         start_time = time.time()
-        # Retrieve candidates via hybrid search (Top 15)
-        candidates = hybrid_retriever.search(query, top_k=15)
+        # Retrieve candidates via hybrid search (Top 30)
+        candidates = hybrid_retriever.search(query, top_k=30)
         # Rerank down to Top 5
         reranked = Reranker.rerank(query, candidates, top_k=5)
         latency = (time.time() - start_time) * 1000

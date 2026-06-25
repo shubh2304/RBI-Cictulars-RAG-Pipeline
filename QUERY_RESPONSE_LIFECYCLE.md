@@ -21,10 +21,10 @@ Step 2a: Dense Retrieval (FAISS)      Step 2b: Sparse Retrieval (BM25)
      └──────────────────┬───────────────────┘
                         ▼
 Step 3: Reciprocal Rank Fusion (RRF) ── Merges candidates by rank scores
-                        │ (Top 15 Chunks)
+                        │ (Top 30 Chunks)
                         ▼
 Step 4: Cross-Encoder Reranker ─────── Full self-attention scoring via BGE
-                        │ (Top 3/5 Chunks)
+                        │ (Top 5 Chunks)
                         ▼
 Step 5: LLM Generation ─────────────── Chat completions (Ollama or native CPU fallback)
                         │ (JSON Output)
@@ -32,10 +32,13 @@ Step 5: LLM Generation ─────────────── Chat comple
 Step 6: Citation Verification ──────── Lexical Jaccard & Semantic Cosine check
                         │ (Verified Footnotes)
                         ▼
-Step 7: Render & Audit ─────────────── Strip non-ASCII terminal errors & Print counts
+Step 7: Server Log & Audit ──────────── Log queries, verify token boundaries, cache hits
+                        │ (FastAPI CORS Response)
+                        ▼
+Step 8: Web Dashboard Display ──────── Render Markdown bubble & mount PDF at cited page (#page=N)
      │
      ▼
-[Final Terminal Output]
+[Final Dashboard Split-Pane View]
 ```
 
 ---
@@ -70,16 +73,16 @@ The dense and sparse lists are combined using Reciprocal Rank Fusion (RRF). RRF 
 $$RRF(chunk) = \frac{1}{60 + \text{Rank}_{\text{dense}}} + \frac{1}{60 + \text{Rank}_{\text{sparse}}}$$
 * If a chunk is in the Top-3 of both searches, its rank score is extremely high.
 * If it only appears in one list, it is still retained but given a lower priority.
-* The system merges the list and keeps the **Top-15** highest scoring chunks.
+* The system merges the list and keeps the **Top-30** highest scoring chunks.
 
 ---
 
 ### Step 4: Cross-Encoder Reranking
 Dense and sparse retrieval search document spaces independently (bi-encoder search). To determine exact alignment, the query and candidates must be cross-analyzed.
-* The Top-15 candidates are passed to a Cross-Encoder reranker (`BAAI/bge-reranker-base`).
+* The Top-30 candidates are passed to a Cross-Encoder reranker (`BAAI/bge-reranker-base`).
 * The system concatenates the query and each chunk into a single sequence: `[Query, Chunk Text]`.
 * The transformer runs full self-attention across all tokens in both strings, scoring their literal relevance.
-* The system sorts the list and retains the **Top-3 or Top-5** chunks.
+* The system sorts the list and retains the **Top-5** chunks.
 
 ---
 
@@ -106,12 +109,18 @@ To prevent hallucinated citations, the system executes double-check validation:
 
 ---
 
-### Step 7: Render & Length Audit
-Before printing to your console:
-* **JSON Cleaning**: Strips out leading/trailing explanations from LLM outputs to isolate the JSON content.
-* **Console Sanitizing**: Replaces non-ASCII unicode characters (like `\u201c` or `\u20b9`) with standard CP1252 text equivalents to prevent rendering corruption.
-* **Length Auditing**: Counts words and characters of the cleaned response:
-  ```text
-  [Response Length: X words, Y characters]
-  ```
-* Displays the final answer and verified citation cards to the user.
+### Step 7: Server Response & Audit Trail
+Before returning the JSON payload to the client, the server performs audit and optimization routines:
+* **Log Queries**: Writes the query text, execution latency, response metadata, and verification verdicts to the SQLite database `query_logs` table for compliance tracking.
+* **CORS Header Inclusion**: Appends headers allowing cross-origin resource requests from the Next.js dev server port (e.g., origin `http://localhost:3000`).
+
+---
+
+### Step 8: Web Dashboard Display & Page Redirection
+Once the JSON response lands on the Next.js client:
+1. **Citation Parsing**: A regular expression scans the flowing response text for citation tags matching the format `[N: Document, Page X]`.
+2. **Inline Citation Button Mounting**: Replaces the plain text strings with interactive buttons. Clicking these buttons updates the active PDF state.
+3. **Double-Pane Display**: Renders the text response on the left, and lists verified vs. hallucinated source text snippets below the bubble.
+4. **Target Page Jump**: If the user clicks "View source page" or an inline citation button, the PDF viewer on the right mounts an iframe pointing to:
+   `${BACKEND_URL}/api/document/${filename}#page=${page_number}`
+   To resolve browser iframe cache anchor issues, a state-driven key `key={viewerKey}` is bound to the iframe and incremented on every selection, forcing the browser to reload and focus on the exact cited page.

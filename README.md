@@ -116,7 +116,8 @@ The top 15 hybrid candidates are passed to a Cross-Encoder reranker (`BAAI/bge-r
 
 ```
 RBI RAG/
-├── main.py                   # FastAPI REST Controller (Endpoint mappings & caches)
+├── main.py                   # CLI RAG pipeline entrypoint
+├── api_server.py             # FastAPI REST Server (serves query API & PDF streams)
 ├── evaluate.py               # Evaluation Suite (Recall@K, MRR accuracy calculations)
 ├── rbi_rag.db                # SQLite database (populated dynamically)
 ├── faiss_index.index         # Vector index binary
@@ -138,9 +139,18 @@ RBI RAG/
 │   ├── fusion.py             # Reciprocal Rank Fusion (RRF) combiner
 │   └── reranker.py           # Cross-encoder candidate scorer
 │
-└── generation/
-    ├── llm_client.py         # Local chat endpoint client (Ollama/llama.cpp compatible)
-    └── citation_verifier.py  # Lexical Jaccard & semantic validation engine
+├── generation/
+│   ├── llm_client.py         # Local chat endpoint client (Ollama/llama.cpp / Native CPU fallback)
+│   └── citation_verifier.py  # Lexical Jaccard & semantic validation engine
+│
+└── frontend/                 # Next.js App Router Web Application
+    ├── package.json          # Node dependencies
+    ├── src/
+    │   └── app/
+    │       ├── page.tsx      # Multi-pane dashboard (Library Sidebar, Chat Panel, PDF Viewer)
+    │       ├── globals.css   # Tailored dark-mode variables, animations, scrollbars
+    │       └── layout.tsx    # App shell wrapper
+    └── tailwind.config.ts    # Styling overrides
 ```
 
 ---
@@ -153,6 +163,8 @@ Install all backend dependencies:
 pip install uvicorn fastapi pydantic pymupdf pdfplumber sentence-transformers faiss-cpu rank-bm25 torch paddlepaddle paddleocr
 ```
 
+Ensure Node.js is installed for running the frontend dashboard client.
+
 ### 1. Database Seeding & Ingestion
 Ensure your RBI documents are in the `circulars/` directory and run:
 ```powershell
@@ -160,22 +172,31 @@ python -m ingestion.seed
 ```
 *This scans, parses, builds the FAISS indexes, and updates your SQLite file.*
 
-### 2. Startup local LLM Server
+### 2. Startup local LLM Server (Optional)
 Start Ollama with the recommended model:
 ```powershell
 ollama run qwen2.5:7b-instruct
 ```
-*(Make sure the Ollama API service is running on its default port `11434`)*
+*(If Ollama is offline or unavailable, the system automatically falls back to running a local Qwen 0.5B model in-memory on CPU)*
 
-### 3. Launching the Web Service
+### 3. Launching the FastAPI Backend API
 Start the FastAPI server:
 ```powershell
-uvicorn main:app --reload --port 8000
+uvicorn api_server:app --reload --port 8000
 ```
-* Access the Swagger UI documentation at `http://127.0.0.1:8000/docs` to test endpoints.
+*This hosts the REST API endpoints and streams PDF files on `http://localhost:8000`.*
 
-### 4. Running Benchmark Audits
+### 4. Launching the Next.js Frontend Dashboard
+Navigate to the `frontend` folder and start the development server:
+```powershell
+cd frontend
+npm run dev
+```
+*Open your browser and navigate to `http://localhost:3000` to interact with the visual dashboard.*
+
+### 5. Running Benchmark Audits
 Run the retrieval performance verification suite:
 ```powershell
 python -m evaluate
 ```
+

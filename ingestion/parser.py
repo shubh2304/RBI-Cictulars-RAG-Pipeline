@@ -32,12 +32,14 @@ def parse_document_to_chunks(ingested_data, document_id):
     current_annex = None
     current_page = 1
     
-    current_chunk_lines = []
+    current_chunk_lines = [] # Stores tuples of (line, page)
     current_chunk_type = "text"
     
-    def finalize_chunk(lines, chunk_type):
-        if not lines:
+    def finalize_chunk(lines_with_pages, chunk_type):
+        if not lines_with_pages:
             return
+            
+        lines = [item[0] for item in lines_with_pages]
         text = "\n".join(lines).strip()
         # Remove any page markers from the final chunk text to keep it clean
         text_cleaned = re.sub(r'\[PAGE_NUM:\d+\]\n?', '', text).strip()
@@ -47,32 +49,66 @@ def parse_document_to_chunks(ingested_data, document_id):
         # Fallback split if chunk is too long (> 600 words)
         word_count = len(text_cleaned.split())
         if word_count > 600 and chunk_type == "text":
-            paragraphs = text_cleaned.split("\n\n")
-            sub_chunk_lines = []
-            sub_word_count = 0
-            for para in paragraphs:
-                para_strip = para.strip()
-                if not para_strip:
+            # Group lines into paragraphs to split cleanly
+            paragraphs_with_pages = []
+            current_para = []
+            for line, page in lines_with_pages:
+                if PAGE_MARKER_PATTERN.match(line.strip()):
+                    current_para.append((line, page))
                     continue
-                para_words = len(para_strip.split())
+                if not line.strip():
+                    if current_para:
+                        paragraphs_with_pages.append(current_para)
+                        current_para = []
+                else:
+                    current_para.append((line, page))
+            if current_para:
+                paragraphs_with_pages.append(current_para)
+                
+            # Secondary splitting: If any single paragraph is too large, split it further by line count (e.g. 20 lines)
+            split_paragraphs = []
+            for para in paragraphs_with_pages:
+                para_word_count = len(" ".join([item[0] for item in para if item[0].strip()]).split())
+                if para_word_count > 500:
+                    for sub_idx in range(0, len(para), 20):
+                        split_paragraphs.append(para[sub_idx:sub_idx+20])
+                else:
+                    split_paragraphs.append(para)
+            paragraphs_with_pages = split_paragraphs
+                
+            sub_chunk = []
+            sub_word_count = 0
+            for para in paragraphs_with_pages:
+                para_text = "\n".join([item[0] for item in para])
+                para_text_clean = re.sub(r'\[PAGE_NUM:\d+\]\n?', '', para_text).strip()
+                para_words = len(para_text_clean.split())
+                
                 if sub_word_count + para_words > 500:
-                    # yield current sub-chunk
-                    yield_chunk(sub_chunk_lines, chunk_type)
-                    sub_chunk_lines = [para_strip]
+                    if sub_chunk:
+                        yield_chunk(sub_chunk, chunk_type)
+                    sub_chunk = para
                     sub_word_count = para_words
                 else:
-                    sub_chunk_lines.append(para_strip)
+                    sub_chunk.extend(para)
                     sub_word_count += para_words
-            if sub_chunk_lines:
-                yield_chunk(sub_chunk_lines, chunk_type)
+            if sub_chunk:
+                yield_chunk(sub_chunk, chunk_type)
         else:
-            yield_chunk(lines, chunk_type)
-
-    def yield_chunk(lines, chunk_type):
+            yield_chunk(lines_with_pages, chunk_type)
+ 
+    def yield_chunk(lines_with_pages, chunk_type):
+        lines = [item[0] for item in lines_with_pages]
         text = "\n".join(lines).strip()
         text_cleaned = re.sub(r'\[PAGE_NUM:\d+\]\n?', '', text).strip()
         if not text_cleaned:
             return
+            
+        # Find first page marker in this sub-chunk
+        chunk_page = current_page
+        for l, p in lines_with_pages:
+            # Ignore structural boundaries / markers and get actual page
+            chunk_page = p
+            break
             
         chunk_id = str(uuid.uuid4())
         chunks.append({
@@ -80,62 +116,66 @@ def parse_document_to_chunks(ingested_data, document_id):
             "document_id": document_id,
             "parent_chunk_id": None, # Will be set in parent-child linking step
             "chunk_type": chunk_type,
-            "page_number": current_page,
+            "page_number": chunk_page,
             "chapter_title": current_chapter,
             "section_title": current_section if not current_annex else current_annex,
             "subsection_title": None,
             "chunk_text": text_cleaned,
             "vector_index": None
         })
-
+ 
     # Line-by-line state machine parser
     for line in stitched_lines:
         line_strip = line.strip()
         if not line_strip:
+            if current_chunk_lines:
+                current_chunk_lines.append(("", current_page))
             continue
             
         # Check page marker
         page_match = PAGE_MARKER_PATTERN.match(line_strip)
         if page_match:
             current_page = int(page_match.group(1))
-            current_chunk_lines.append(line_strip) # Keep to track page within text
+            current_chunk_lines.append((line_strip, current_page)) # Keep to track page within text
             continue
             
         # Check for structural changes
         chap_match = CHAP_PATTERN.match(line_strip)
         sec_match = SEC_PATTERN.match(line_strip)
         annex_match = ANNEX_PATTERN.match(line_strip)
+        if annex_match and line_strip.strip().endswith('.'):
+            annex_match = None
         faq_match = FAQ_PATTERN.match(line_strip)
         
         # If we hit a new structural header, finalize the previous chunk
         if doc_type == "FAQs" and faq_match:
             finalize_chunk(current_chunk_lines, current_chunk_type)
-            current_chunk_lines = [line_strip]
+            current_chunk_lines = [(line_strip, current_page)]
             current_chunk_type = "faq_pair"
             current_section = faq_match.group(1).strip()
             current_annex = None
         elif chap_match:
             finalize_chunk(current_chunk_lines, current_chunk_type)
-            current_chunk_lines = [line_strip]
+            current_chunk_lines = [(line_strip, current_page)]
             current_chunk_type = "text"
             current_chapter = line_strip
             current_section = None
             current_annex = None
         elif annex_match:
             finalize_chunk(current_chunk_lines, current_chunk_type)
-            current_chunk_lines = [line_strip]
+            current_chunk_lines = [(line_strip, current_page)]
             current_chunk_type = "text"
             current_annex = line_strip
             current_chapter = None
             current_section = None
         elif sec_match and not current_annex:
             finalize_chunk(current_chunk_lines, current_chunk_type)
-            current_chunk_lines = [line_strip]
+            current_chunk_lines = [(line_strip, current_page)]
             current_chunk_type = "text"
             current_section = line_strip
         else:
-            current_chunk_lines.append(line)
-
+            current_chunk_lines.append((line, current_page))
+ 
     # Finalize remaining text chunk
     finalize_chunk(current_chunk_lines, current_chunk_type)
 

@@ -153,10 +153,11 @@ class CitationVerifier:
         """
         response_text = llm_response.get("response", "")
         answer_status = llm_response.get("answer_status")
+        answerable = llm_response.get("answerable")
         
-        # If the LLM declared the answer is NOT_FOUND, ensure we use the standard NOT_FOUND text
-        if answer_status == "NOT_FOUND":
-            response_text = "The retrieved RBI circulars do not contain sufficient information to answer this question."
+        # If the LLM declared the answer is NOT_FOUND or not answerable, ensure we use the standard NOT_FOUND text
+        if answer_status == "NOT_FOUND" or answerable is False:
+            response_text = "The provided RBI circulars do not contain sufficient information to answer this query."
         
         # Robust recovery logic for response text if the model returned non-standard JSON keys
         if not response_text:
@@ -207,6 +208,11 @@ class CitationVerifier:
                 
             # Extract tag
             tag = cit.get("tag") or cit.get("citation_tag")
+            if isinstance(tag, int):
+                tag = f"[{tag}]"
+            elif isinstance(tag, str) and not tag.startswith("["):
+                tag = f"[{tag}]"
+                
             # Extract block index
             block_idx = cit.get("context_index") or cit.get("source_block_index")
             # Filter low-confidence claims if confidence is below 0.5
@@ -218,7 +224,7 @@ class CitationVerifier:
                 except (ValueError, TypeError):
                     pass
                     
-            # Extract statements (can be a list in the new schema, or a single string in the old schema)
+            # Extract statements (can be a list or a single string in new/old schemas)
             statements = []
             if "statements" in cit:
                 stmts = cit["statements"]
@@ -226,6 +232,10 @@ class CitationVerifier:
                     statements.extend([s for s in stmts if isinstance(s, str)])
                 elif isinstance(stmts, str):
                     statements.append(stmts)
+            elif "statement" in cit:
+                stmt = cit["statement"]
+                if isinstance(stmt, str):
+                    statements.append(stmt)
             elif "source_statement" in cit:
                 stmt = cit["source_statement"]
                 if isinstance(stmt, str):
@@ -315,7 +325,7 @@ class CitationVerifier:
             
             if filename:
                 import urllib.parse
-                import urllib.request
+                from pathlib import Path
                 import fitz
                 
                 base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -333,14 +343,41 @@ class CitationVerifier:
                             
                         norm_search = normalize(best_sentence)
                         if norm_search:
+                            # 1. First check for an exact match of the entire sentence
                             for page_idx in range(len(doc)):
                                 page_text = doc[page_idx].get_text()
                                 if norm_search in normalize(page_text):
                                     detected_page = page_idx + 1
                                     break
                                     
+                        # 2. If not found, use sliding window word-matching to find the page containing most of the sentence
                         if not detected_page:
-                            # Try prefix/suffix matching if split across pages
+                            search_words = best_sentence.split()
+                            window_size = min(8, len(search_words))
+                            if window_size >= 4:
+                                windows = []
+                                for start_i in range(len(search_words) - window_size + 1):
+                                    subphrase = " ".join(search_words[start_i:start_i + window_size])
+                                    norm_sub = normalize(subphrase)
+                                    if len(norm_sub) > 10: # skip short trivial phrases
+                                        windows.append(norm_sub)
+                                        
+                                if windows:
+                                    best_page_idx = None
+                                    max_matches = 0
+                                    for page_idx in range(len(doc)):
+                                        page_text = doc[page_idx].get_text()
+                                        norm_page = normalize(page_text)
+                                        matches = sum(1 for w in windows if w in norm_page)
+                                        if matches > max_matches:
+                                            max_matches = matches
+                                            best_page_idx = page_idx
+                                            
+                                    if best_page_idx is not None and max_matches > 0:
+                                        detected_page = best_page_idx + 1
+                                        
+                        # 3. Fallback: try prefix/suffix matching
+                        if not detected_page:
                             words = best_sentence.split()
                             if len(words) > 6:
                                 first_part = normalize(" ".join(words[:6]))
@@ -358,7 +395,8 @@ class CitationVerifier:
                 if detected_page:
                     page = detected_page
                 
-                pdf_url = f"file:{urllib.request.pathname2url(os.path.abspath(pdf_path))}"
+                # Standard cross-platform file URI generation using Path.as_uri()
+                pdf_url = Path(os.path.abspath(pdf_path)).as_uri()
                 pdf_url += f"#page={page}"
                 
 
@@ -396,8 +434,11 @@ class CitationVerifier:
                 
             verified_citations.append(verified_cit)
             
-        # Clean response text by removing all inline citation tags
-        cleaned_response = re.sub(r'\s*\[\d+\]', '', response_text)
+        # Enrich inline references as per production requirements (Section 5)
+        if not verified_citations:
+            cleaned_response = re.sub(r'\s*\[\d+\]', '', response_text)
+        else:
+            cleaned_response = cls.enrich_inline_citations(response_text, verified_citations)
         
         return {
             "response": cleaned_response,
@@ -405,6 +446,34 @@ class CitationVerifier:
             "warnings": hallucination_warnings,
             "hallucination_detected": any(not c["verified"] for c in verified_citations)
         }
+
+    @classmethod
+    def enrich_inline_citations(cls, response_text: str, verified_citations: list[dict]) -> str:
+        """
+        Replaces [1], [2], ... in response_text with rich inline references:
+            [1: Priority Sector Lending, Page 3, Section 2.1]
+        """
+        tag_map = {}
+        for c in verified_citations:
+            tag_str = c["citation_tag"] # e.g. "[1]"
+            match = re.search(r'\d+', tag_str)
+            if match:
+                tag_num = int(match.group(0))
+                tag_map[tag_num] = c
+
+        def replace_tag(match):
+            n = int(match.group(1))
+            if n not in tag_map:
+                return match.group(0)   # leave unknown tags untouched
+            c = tag_map[n]
+            src = c["source"]
+            doc_name = src["document_name"]
+            page = src["page_number"]
+            sec = src["section_title"]
+            section_part = f", Section {sec}" if sec and sec != "None" else ""
+            return f"[{n}: {doc_name}, Page {page}{section_part}]"
+
+        return re.sub(r'\[(\d+)\]', replace_tag, response_text)
 
 if __name__ == "__main__":
     # Test citation verification

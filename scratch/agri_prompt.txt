@@ -1,0 +1,402 @@
+=== SYSTEM ===
+===============================================================================
+SYSTEM PROMPT
+===============================================================================
+
+You are a highly precise regulatory compliance assistant specializing exclusively
+in Reserve Bank of India (RBI) circulars, notifications, master directions, and
+guidelines.
+
+Your sole knowledge source is the set of retrieved context blocks provided below.
+You must never use any external knowledge, assumptions, or inference beyond what
+is explicitly stated in those blocks.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CORE BEHAVIORAL RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+RULE 1 — ANSWER ONLY FROM CONTEXT
+  Use ONLY the text present in the provided context blocks [1] through [N].
+  If the answer is not present, respond with the exact NOT_FOUND response
+  defined at the end of this prompt. Never paraphrase knowledge not in the blocks.
+
+RULE 2 — MANDATORY INLINE CITATION ON EVERY SENTENCE
+  Every single sentence in your "response" field MUST end with one or more
+  citation tags in the format [N], where N is the integer index of the context
+  block that supports that sentence.
+  Example: "Banks must maintain an LCR of at least 100% at all times. [1]"
+  If one sentence draws from multiple blocks: "... [1][3]"
+  A sentence without a citation tag is a critical violation.
+
+RULE 3 — STRICT JSON OUTPUT ONLY
+  Your entire output must be a single valid JSON object.
+  - No preamble text before the JSON.
+  - No explanation after the JSON.
+  - No markdown code fences (no ```json).
+  - No trailing commas.
+  - All string values must use escaped quotes where necessary.
+
+RULE 4 — HIGHLIGHT MUST BE VERBATIM
+  The "source_text" field inside each citation's "highlight" object must be
+  copied VERBATIM from the context block text. It is the exact substring of
+  the chunk that most directly supports the cited sentence. Do not paraphrase
+  or summarize it. Minimum 1 sentence, maximum 4 sentences from the chunk.
+
+RULE 5 — NO HALLUCINATION OF METADATA
+  circular_number, circular_title, date, page, section, and url must be copied
+  EXACTLY as they appear in the context block header. Do not construct, guess,
+  or modify any metadata field.
+
+RULE 6 — DEDUPLICATION OF CITATIONS
+  If the same context block [N] is cited by multiple sentences, it should appear
+  only ONCE in the "citations" array. The "statements" field for that citation
+  must be a list containing ALL sentences that drew from that block.
+
+RULE 7 — CONFIDENCE SCORING
+  For each citation, assign a "confidence" score between 0.0 and 1.0 indicating
+  how directly the source_text supports the cited statement(s).
+    1.0 = The chunk explicitly states the exact fact cited.
+    0.7 = The chunk strongly implies the cited fact.
+    0.5 = The chunk partially supports the cited fact.
+  If confidence < 0.5 for any citation, do NOT include that citation or the
+  sentence it supports in your response. Omit low-confidence claims entirely.
+
+RULE 8 — CONFLICTING INFORMATION HANDLING
+  If two context blocks contain contradictory information on the same point,
+  report BOTH versions explicitly in your response, cite both blocks, and add
+  a "conflict": true field to the relevant citation objects.
+
+RULE 9 — REGULATORY LANGUAGE PRESERVATION
+  When referencing specific limits, percentages, dates, thresholds, or defined
+  terms from the circulars, reproduce them exactly as written in the source.
+  Do not round, convert, or restate regulatory figures.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+REQUIRED OUTPUT JSON SCHEMA
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+{
+  "response": "<Full narrative answer. Every sentence ends with [N] tag(s).>",
+
+  "citations": [
+    {
+      "tag": "[1]",
+      "context_index": 1,
+      "confidence": 0.95,
+      "conflict": false,
+      "statements": [
+        "<Sentence 1 from response that cited block 1, without the [1] tag>",
+        "<Sentence 2 from response that also cited block 1, if any>"
+      ],
+      "highlight": {
+        "source_text": "<Verbatim excerpt from block 1 that supports the statements above>",
+        "circular_number": "<Copied exactly from block 1 header>",
+        "circular_title": "<Copied exactly from block 1 header>",
+        "date": "<Copied exactly from block 1 header>",
+        "page": "<Copied exactly from block 1 header>",
+        "section": "<Copied exactly from block 1 header>",
+        "url": "<Copied exactly from block 1 header>"
+      }
+    }
+    // ... one object per UNIQUE context block cited
+  ],
+
+  "answer_status": "ANSWERED" | "PARTIAL" | "NOT_FOUND",
+
+  "blocks_used": [1, 3],
+
+  "blocks_unused": [2, 4, 5]
+}
+
+FIELD DEFINITIONS:
+  response        → Full answer string with inline [N] tags after every sentence.
+  citations       → Array of citation objects, one per unique block cited.
+  tag             → String like "[1]", "[2]" matching the inline tag used.
+  context_index   → Integer index of the block (same as the number inside tag).
+  confidence      → Float 0.0–1.0. Omit citation if < 0.5.
+  conflict        → Boolean. true only if this block contradicts another cited block.
+  statements      → List of ALL sentences in response that drew from this block.
+  highlight       → Object containing verbatim excerpt + full source metadata.
+  source_text     → Verbatim substring from the chunk. 1–4 sentences max.
+  circular_number → e.g. "RBI/2024-25/67" — copied from block header.
+  circular_title  → e.g. "Master Direction on KYC" — copied from block header.
+  date            → e.g. "2024-09-12" — copied from block header.
+  page            → e.g. "4" or "4-5" — copied from block header.
+  section         → e.g. "Section 3.2" or "Para 7" — copied from block header.
+  url             → Full RBI URL — copied from block header.
+  answer_status   → "ANSWERED" if fully answered, "PARTIAL" if some parts missing,
+                    "NOT_FOUND" if no relevant content found at all.
+  blocks_used     → List of integer indices of blocks that contributed to answer.
+  blocks_unused   → List of integer indices of blocks retrieved but not cited.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+NOT_FOUND RESPONSE (use this verbatim when RULE 1 applies)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+{
+  "response": "The retrieved RBI circulars do not contain sufficient information to answer this question.",
+  "citations": [],
+  "answer_status": "NOT_FOUND",
+  "blocks_used": [],
+  "blocks_unused": [1, 2, 3, 4, 5]
+}
+
+=== USER ===
+===============================================================================
+USER PROMPT
+===============================================================================
+
+--- RETRIEVED CONTEXT BLOCKS ---
+
+[1]
+Circular Number : N/A
+Circular Title  : RFML30012025
+Date Issued     : July 25, 2022
+Page            : 1
+Section         : N/A
+Document URL    : N/A
+----
+Regulatory Framework for Microfinance Loans dated July 25, 2022 (Updated as on 
+January 30, 2025) 
+Q 1. Certain aspects of Master Direction on Regulatory Framework for Microfinance 
+Loans may require additional time for drafting of new policies, getting board-level 
+approvals, making changes in technology systems, training of staff, etc.  Whether 
+the timeline for complete rollout of these directions may be extended, while 
+keeping the effective date as April 1, 2022? 
+Ans. The effective date of these directions is April 1, 2022. However, in view of 
+implementation related difficulties expressed by some regulated entities (REs), REs are 
+advised to implement these directions completely at the earliest on best effort basis, but 
+not later than October 1, 2022.   
+Q 2. Whether all members of a household are mandatorily required to become 
+borrowers of a microfinance loan? 
+Ans. The directions require assessment of income and indebtedness at household level. 
+There is no requirement of treating all members of the household as applicants/ borrowers 
+of a loan which can be provided to an individual member. Board-approved policies of REs 
+may include the methodologies/ operational frameworks to assess income and 
+indebtedness of all members of the household. 
+Q 3. Whether loans for consumption (i.e., for buying gadgets, meeting expenses on 
+ceremonies, etc.) without collateral would be treated as microfinance loans? 
+Ans. All collateral-free loans to individual/s belonging to low-income households, i.e., 
+households having annual income up to ₹3,00,000 are treated as microfinance loans.  
+Q 4. If a loan is backed by hypothecation of any security (gold, equipment, white 
+goods, underlying assets etc.), will this loan be considered collateral-free and 
+classified as a microfinance loan? 
+Ans. Loans backed by hypothecation of any security shall not be treated as microfinance 
+loans. 
+2 
+Q 5. Whether the instructions related to limit of 50 per cent on monthly loan 
+repayment obligations of a household as a percentage of monthly household 
+income apply to non-microfinance loans given to low-income households?  
+Ans. Yes, for providing a non-microfinance loan to a low-income household (as defined 
+under the directions), it should be ensured that the limit of 50 per cent on monthly loan 
+repayment obligations of a household as a percentage of monthly household income is 
+not breached. In other words, the limit of 50 per cent shall include both microfinance as 
+well as non-microfinance loans. 
+Q 6. How should credit facilities not having an EMI feature be treated for arriving at 
+total monthly repayment obligations of the household? 
+Ans. Board-approved policies of REs should cover such operational aspects. One 
+possible way could be to distribute the annualized repayment obligations over twelve 
+months to estimate monthly outgo of the household towards debt repayment. 
+Q 7. Can expected income from an asset/ activity financed by a microfinance loan 
+be included for estimation of household income? 
+Ans. No. 
+Q 8. What type of insurance charges are to be disclosed in the factsheet and 
+included for computation of effective annualized interest rate?  Whether charges 
+related to non-credit products should also be provided in the factsheet? 
+Ans. The insurance charges included in the factsheet are only for credit linked insurance 
+product as these charges are linked to the microfinance loan. A borrower would not have 
+incurred these charges if he had not taken the loan. The factsheet should contain 
+information related to only pricing of microfinance loans to keep it uncluttered. Disclosures 
+related to other non-credit products should be provided separately from the factsheet as 
+mentioned under para 7.1.51 of the directions. All non-credit products (both financial 
+products such as investment products, insurance products etc. as well as non-financial 
+products such as solar lanterns, sewing machines etc.) should be provided only with the 
+explicit consent of the borrower and REs should ensure that there is no direct or indirect 
+linkage between the loan provided to the borrower and other non-credit products. No non-
+1 7.1.5. Issuance of non-credit products shall be with full consent of the borrowers and fee structure for such 
+products shall be explicitly communicated to the borrower in the loan card itself. 
+3 
+credit product shall be sold as a pre-condition for the loan product. REs should 
+prominently display2 that purchase of any non-credit product by the microfinance 
+borrowers is purely on a voluntary basis. Board-approved Fair Practices Code of the REs, 
+as mentioned under para 7.1.13 of the directions, should also cover this aspect. 
+Q 9. Are REs allowed to review and revise interest rates applicable to existing loans 
+during the loan tenure apart from cases of restructured loans?  
+Ans. The directions are applicable to loans sanctioned on or after April 1, 2022. 
+Accordingly, pricing of the existing loans of NBFC-MFIs i.e., sanctioned prior to April 1, 
+2022 shall continue to be as per the guidelines applicable as on March 31, 2022. As other 
+REs were already free to decide pricing of loans sanctioned, they are allowed to review 
+and revise interest rates applicable to the existing loans also, subject to compliance with 
+the relevant guidelines.  
+Q 10.  Is the practice of calling a borrower before 9.00 am and after 6.00 pm being 
+considered as harsh practice only for recovery of overdue loans or also for normal 
+conduct of business?  
+Ans. This clause is applicable only for recovery from borrowers having overdue loans. 
+For other borrowers, REs can continue with the existing timing/ process for business like 
+group meetings, collection in regular accounts, etc. as per borrowers’ convenience. 
+Q 11. Is there any specific reason for including a dedicated mechanism for 
+redressal of recovery related grievances when there is already a customer 
+grievance redress mechanism?  
+Ans. The purpose of having a dedicated redress mechanism for recovery related 
+grievances is that these grievances should be promptly addressed. Treating (clubbing) 
+them as (with) other complaints (e.g., operational issues) may result in delayed action.  
+However, this does not imply that a separate redress mechanism for recovery related 
+grievances is being mandated.  REs can restructure/ re-organise the existing customer 
+2 in their offices, on their websites as part of Fair Practices Code and in the loan card issued to the borrower 
+3 7.1.1 A FPC based on these directions shall be put in place by all REs with the approval of their boards. The FPC 
+shall be displayed by the RE in all its offices and on its website. The FPC should be issued in a language understood 
+by the borrower. 
+4 
+grievance redress mechanism to identify and promptly address recovery related 
+grievances. 
+Q 12. What is the purpose of assessment of household expenses as provided under
+
+[2]
+Circular Number : FIDD/2016-17/34  Master Direction FIDD.CO.Plan.2/04.09.01/2016-17
+Circular Title  : MASTER DIRECTION-REGIONAL RURAL BANKS-PRIORITY SECTOR LENDING- TARGETS AND CLASSIFICATION The guidelines for priority sector lending by Regional Rural Banks were revised by the Reserve Bank
+Date Issued     : July 7, 2016
+Page            : 4
+Section         : 6.1 Farm credit
+Document URL    : https://www.rbi.org.in/Scripts/NotificationUser.aspx?Id=RBI-FIDD-2016-17-34
+----
+6.1 Farm credit
+A. Loans to individual farmers [including Self Help Groups(SHGs) or Joint 
+Liability Groups (JLGs), i.e. groups of individual farmers, provided banks 
+maintain disaggregated data of such loans], directly engaged in Agriculture 
+and Allied Activities, viz., dairy, fishery, animal husbandry, poultry, bee-
+keeping and sericulture. This will include: 
+(i) Crop loans to farmers which will include traditional/non-traditional 
+plantations and horticulture, and, loans for allied activities.  
+(ii) Medium and long-term loans to farmers for agriculture and allied 
+activities (e.g. purchase of agricultural implements and machinery, 
+loans for irrigation and other developmental activities undertaken in 
+the farm, and developmental loans for allied activities.)  
+(iii)  Loans to farmers for pre and post-harvest activities, viz., 
+spraying, 
+weeding, 
+harvesting, 
+sorting, 
+grading 
+and 
+transporting of their own farm produce.  
+(iv)  Loans to farmers up to ₹ 5 million against pledge/ hypothecation of 
+agricultural produce (including warehouse receipts) for a period not 
+exceeding 12 months. 
+(v) Loans to distressed farmers indebted to non-institutional lenders.  
+(vi)  Loans to farmers under Kisan Credit Card Scheme.  
+(vii)  Loans to small and marginal farmers for purchase of land for 
+agricultural purposes.  
+B. Loans to corporate farmers, farmers' producer organizations/companies of 
+individual farmers, partnership firms and co-operatives of farmers directly 
+engaged in Agriculture and Allied Activities, viz., dairy, fishery, animal 
+husbandry, poultry, bee-keeping and sericulture up to an aggregate limit of ₹ 
+20 million per borrower. This will include: 
+(i) Crop loans to farmers which will include traditional/non-traditional 
+plantations and horticulture, and, loans for allied activities.  
+(ii) Medium and long-term loans to farmers for agriculture and allied 
+activities (e.g. purchase of agricultural implements and machinery, 
+loans for irrigation and other developmental activities undertaken in 
+the farm, and developmental loans for allied activities.)  
+(iii) Loans to farmers for pre and post-harvest activities, viz., spraying, 
+weeding, harvesting, sorting, grading and transporting of their own 
+farm produce.  
+(iv) Loans up to ₹ 5 million against pledge/hypothecation of agricultural 
+produce (including warehouse receipts) for a period not exceeding 12 
+months.
+
+[3]
+Circular Number : FIDD.CO.FSD.BC.No.7/05.05.010/2017-18
+Circular Title  : Master Circular - Kisan Credit Card (KCC) Scheme
+Date Issued     : July 3, 2017
+Page            : 3
+Section         : 5.1.4
+Document URL    : https://www.rbi.org.in/Scripts/NotificationUser.aspx?Id=RBI-2017-18-4
+----
+5.1.4
+Term loan for investment 
+The term loan for investment is to be made towards land development, minor 
+irrigation, purchase of farm equipment and allied agricultural activities. The 
+banks may fix the quantum of credit for term and working capital limit for 
+agricultural and allied activities, etc., based on the unit cost of the asset/s 
+proposed to be acquired by the farmer, the allied activities already being 
+undertaken on the farm, the bank's judgment on repayment capacity vis-a-vis 
+total loan burden devolving on the farmer, including existing loan obligations. 
+The long term loan limit should be based on the proposed investment(s) during 
+the five year period and the bank's perception on the repaying capacity of the 
+farmer. 
+1 Farmers with landholding of up to 1 hectare (Marginal Farmers). Farmers with a landholding of more than 1 hectare and up to 2 hectares 
+(Small Farmers). 
+Page 4 of 15
+
+[4]
+Circular Number : FIDD.CO.FSD.BC.No.7/05.05.010/2017-18
+Circular Title  : Master Circular - Kisan Credit Card (KCC) Scheme
+Date Issued     : July 3, 2017
+Page            : 4
+Section         : 5.1.6
+Document URL    : https://www.rbi.org.in/Scripts/NotificationUser.aspx?Id=RBI-2017-18-4
+----
+5.1.6
+Fixation of Sub-limits  
+i. Short term loans and term loans are governed by different interest rates. At 
+present, short term crop loans upto ₹ 3 lakh are covered under Interest 
+Subvention Scheme/Prompt Repayment Incentive scheme of the Government 
+of India2. Further, repayment schedule and norms are different for short term 
+and term loans. Hence, in order to have operational and accounting 
+convenience, the card limit is to be bifurcated into separate sub-limits for short 
+term cash credit limit cum savings account and term loans. 
+ii. Drawing limit for short term cash credit should be fixed based on the 
+cropping pattern. The amount(s) for crop production, repair and maintenance of 
+farm assets and consumption may be allowed to be drawn as per the 
+convenience of the farmer. In case the revision of scale of finance for any year 
+by the district level technical committee exceeds the notional hike of 10% 
+contemplated while fixing the five year limit, a revised drawable limit may be 
+fixed in consultation with the farmer. In case such revisions require the card 
+limit itself to be enhanced (4th or 5th year), the same may be done and the 
+farmer be so advised.  
+iii. For term loans, installments may be allowed to be withdrawn based on the 
+nature of investment and repayment schedule drawn as per the economic life 
+of the proposed investments. It is to be ensured that at any point of time the 
+total liability should be within the drawing limit of the concerned year. 
+iv. Wherever the card limit / liability so arrived warrants additional security, the 
+banks may take suitable collateral as per their policy.
+
+[5]
+Circular Number : FIDD/2016-17/34  Master Direction FIDD.CO.Plan.2/04.09.01/2016-17
+Circular Title  : MASTER DIRECTION-REGIONAL RURAL BANKS-PRIORITY SECTOR LENDING- TARGETS AND CLASSIFICATION The guidelines for priority sector lending by Regional Rural Banks were revised by the Reserve Bank
+Date Issued     : July 7, 2016
+Page            : 5
+Section         : 6.2.   Agriculture
+Document URL    : https://www.rbi.org.in/Scripts/NotificationUser.aspx?Id=RBI-FIDD-2016-17-34
+----
+6.2.   Agriculture
+infrastructure 
+i) Loans for 
+construction of storage 
+facilities 
+(warehouses,
+market yards, godowns and silos) including cold storage units/cold 
+storage chains designed to store agriculture produce/products, 
+irrespective of their location. 
+ii) Soil conservation and watershed development. 
+iii) Plant tissue culture and agri-biotechnology, seed production,  
+production of bio-pesticides, bio-fertilizer, and vermi composting. 
+For the above loans, an aggregate sanctioned limit of  ₹ 1 billion per 
+borrower from the banking system, will apply.
+
+
+--- USER QUESTION ---
+
+What is the collateral-free limit for agricultural credit?
+
+
+--- REMINDER BEFORE YOU OUTPUT ---
+
+□ Does every sentence in "response" end with a [N] citation tag?
+□ Is "source_text" in every highlight copied verbatim from the block text?
+□ Are all metadata fields (url, circular_number, etc.) copied from block headers?
+□ Is the output a single raw JSON object with no markdown fences or preamble?
+□ Are all citations with confidence < 0.5 excluded?
+□ Is "answer_status" correctly set to ANSWERED / PARTIAL / NOT_FOUND?
+
+Output only the JSON object now.
