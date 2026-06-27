@@ -5,6 +5,8 @@ import os
 # Disable Hugging Face progress bars and warning logs in the terminal
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
 os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "1"
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
 # Force transformers to only log errors, avoiding download prints
 from transformers.utils import logging as tf_logging
@@ -31,30 +33,67 @@ def sanitize_text(text):
     return text.encode('ascii', 'replace').decode('ascii')
 
 def query_system(query_text, top_k=5):
-    print("=" * 80)
-    print(f"Query: {query_text}")
-    print("=" * 80)
-    
+    # Check for simple greetings or smalltalk to respond instantly
+    greeting_res = LLMClient.check_greetings_and_smalltalk(query_text)
+    if greeting_res:
+        print("\n" + "#" * 80)
+        print("                             GENERATED ANSWER                                   ")
+        print("#" * 80)
+        print(greeting_res["response"])
+        print("=" * 80)
+        return
+        
     # 1. Initialize Hybrid Search
     print("[1/4] Running Hybrid Retrieval (BM25 + FAISS)...")
     hybrid = HybridRetriever()
-    candidates = hybrid.search(query_text, top_k=30)
     
-    if not candidates:
-        print("No matches found in the corpus.")
+    # Decompose query if it's compound / multi-query
+    sub_queries = LLMClient.decompose_query(query_text)
+    if len(sub_queries) > 1:
+        print(f"Decomposed into {len(sub_queries)} sub-questions:")
+        for idx, sq in enumerate(sub_queries, start=1):
+            print(f"  {idx}. {sq}")
+            
+    merged_chunks = []
+    seen_chunk_ids = set()
+    
+    # 2. Rerank Chunks per sub-query
+    print(f"[2/4] Retrieval & Reranking candidates for each sub-question...")
+    for sub_q in sub_queries:
+        candidates = hybrid.search(sub_q, top_k=5)
+        if not candidates:
+            continue
+        reranked_sub = Reranker.rerank(sub_q, candidates, top_k=top_k)
+        for chunk in reranked_sub:
+            c_id = chunk["chunk_id"]
+            if c_id not in seen_chunk_ids:
+                seen_chunk_ids.add(c_id)
+                merged_chunks.append(chunk)
+            else:
+                for existing in merged_chunks:
+                    if existing["chunk_id"] == c_id:
+                        if chunk.get("rerank_score", 0.0) > existing.get("rerank_score", 0.0):
+                            existing["rerank_score"] = chunk["rerank_score"]
+                        break
+                        
+    merged_chunks.sort(key=lambda x: x.get("rerank_score", 0.0), reverse=True)
+    final_chunks = merged_chunks[:15]
+    
+    if not final_chunks or final_chunks[0].get("rerank_score", -99.0) < 0.02:
+        print("\n" + "#" * 80)
+        print("                             GENERATED ANSWER                                   ")
+        print("#" * 80)
+        print("The query is outside the scope of the ingested RBI regulatory guidelines. I am only trained to answer questions about RBI compliance and circulars.")
+        print("=" * 80)
         return
         
-    # 2. Rerank Chunks
-    print(f"[2/4] Reranking {len(candidates)} candidates using BGE Cross-Encoder...")
-    reranked = Reranker.rerank(query_text, candidates, top_k=top_k)
-    
     # 3. Generate Answer
     print("[3/4] Generating answer from LLM...")
-    llm_output = LLMClient.generate_answer(query_text, reranked)
+    llm_output = LLMClient.generate_answer(query_text, final_chunks, sub_queries=sub_queries)
     
     # 4. Verify Citations
     print("[4/4] Verifying citations against source texts...")
-    final_response = CitationVerifier.verify_citations(llm_output, reranked)
+    final_response = CitationVerifier.verify_citations(llm_output, final_chunks)
     
     # Render final output
     print("\n" + "#" * 80)

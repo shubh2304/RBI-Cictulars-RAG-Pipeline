@@ -269,6 +269,9 @@ class CitationVerifier:
             source_chunk = retrieved_chunks[idx]
             source_text = source_chunk["chunk_text"]
             
+            # Clean statement from leading list numbering (e.g. "1. ")
+            statement_clean = re.sub(r'^\d+\.\s*', '', statement).strip()
+            
             # Split source_text into sentences and perform sentence-level matching
             sentences = cls.split_into_sentences(source_text)
             best_sentence = ""
@@ -278,16 +281,17 @@ class CitationVerifier:
             for s in sentences:
                 if len(tokenize_text(s)) < 3: # Skip trivial snippets
                     continue
-                jacc_s = cls.compute_token_jaccard(statement, s)
-                sem_s = cls.compute_semantic_similarity(statement, s)
+                s_clean = re.sub(r'^\d+\.\s*', '', s).strip()
+                jacc_s = cls.compute_token_jaccard(statement_clean, s_clean)
+                sem_s = cls.compute_semantic_similarity(statement_clean, s_clean)
                 if sem_s > best_semantic:
                     best_semantic = sem_s
                     best_jaccard = jacc_s
                     best_sentence = s
 
             # Fallback to full-chunk matching in case statement is summarized
-            jaccard_full = cls.compute_token_jaccard(statement, source_text)
-            semantic_full = cls.compute_semantic_similarity(statement, source_text)
+            jaccard_full = cls.compute_token_jaccard(statement_clean, source_text)
+            semantic_full = cls.compute_semantic_similarity(statement_clean, source_text)
             
             jaccard_score = max(best_jaccard, jaccard_full)
             semantic_score = max(best_semantic, semantic_full)

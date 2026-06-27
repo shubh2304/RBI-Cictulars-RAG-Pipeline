@@ -1,5 +1,9 @@
 import time
 import os
+
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
+
 from database.connection import get_connection
 from retrieval.fusion import HybridRetriever
 from retrieval.reranker import Reranker

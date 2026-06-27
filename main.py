@@ -2,6 +2,10 @@ import time
 import uuid
 import json
 import os
+
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
+
 import secrets
 import hashlib
 import logging
@@ -119,9 +123,17 @@ def startup_event():
     except Exception as e:
         logger.warning(f"Startup warning - could not build vector index: {e}")
     retriever = HybridRetriever()
+    # Pre-load embedding model
+    from retrieval.dense import EmbeddingService
+    logger.info("Pre-loading embedding model at server startup...")
+    EmbeddingService.get_model()
+    # Pre-load reranker
+    from retrieval.reranker import Reranker
+    logger.info("Pre-loading reranker model at server startup...")
+    Reranker.get_model()
 
 class QueryRequest(BaseModel):
-    query: str = Field(..., max_length=1000, description="Compliance search query (max 1000 characters)")
+    query: str = Field(..., max_length=200000, description="Compliance search query (max 200,000 characters)")
     top_k: int = Field(5, ge=1, le=50, description="Retrieve top K candidates (1 to 50)")
     bypass_cache: bool = False
 
@@ -139,6 +151,13 @@ def run_query(request: QueryRequest, client: dict = Depends(authenticate_client)
     if not query:
         raise HTTPException(status_code=400, detail="Query text cannot be empty.")
         
+    # Check for simple greetings or smalltalk to respond instantly
+    greeting_res = LLMClient.check_greetings_and_smalltalk(query)
+    if greeting_res:
+        execution_time = (time.time() - start_time) * 1000
+        greeting_res["execution_time_ms"] = round(execution_time, 2)
+        return greeting_res
+        
     conn = get_connection()
     cursor = conn.cursor()
     
@@ -152,31 +171,55 @@ def run_query(request: QueryRequest, client: dict = Depends(authenticate_client)
             conn.close()
             return json.loads(cached_row["response_text"])
             
-    # 2. Hybrid Retrieval (BM25 + FAISS + RRF Score Fusion)
+    # 2. Decomposed Retrieval and Reranking
     if retriever is None:
         retriever = HybridRetriever()
+        
+    # Decompose query if it's compound / multi-query
+    sub_queries = LLMClient.decompose_query(query)
     
-    # Fetch top 15 candidates for reranking
-    candidates = retriever.search(query, top_k=15)
+    merged_chunks = []
+    seen_chunk_ids = set()
     
-    if not candidates:
+    for sub_q in sub_queries:
+        # Fetch candidates for each sub-query
+        candidates = retriever.search(sub_q, top_k=15)
+        if not candidates:
+            continue
+        # Rerank candidates against this sub-query
+        reranked_sub = Reranker.rerank(sub_q, candidates, top_k=request.top_k)
+        for chunk in reranked_sub:
+            c_id = chunk["chunk_id"]
+            if c_id not in seen_chunk_ids:
+                seen_chunk_ids.add(c_id)
+                merged_chunks.append(chunk)
+            else:
+                # If already present, keep the one with higher rerank score
+                for existing in merged_chunks:
+                    if existing["chunk_id"] == c_id:
+                        if chunk.get("rerank_score", 0.0) > existing.get("rerank_score", 0.0):
+                            existing["rerank_score"] = chunk["rerank_score"]
+                        break
+                        
+    # Sort by rerank score descending and limit to top results
+    merged_chunks.sort(key=lambda x: x.get("rerank_score", 0.0), reverse=True)
+    final_chunks = merged_chunks[:15]
+    
+    if not final_chunks or final_chunks[0].get("rerank_score", -99.0) < 0.02:
         response = {
-            "response": "No relevant RBI guidelines or notifications were found in the database.",
+            "response": "The query is outside the scope of the ingested RBI regulatory guidelines. I am only trained to answer questions about RBI compliance and circulars.",
             "citations": [],
-            "warnings": ["No context found."],
+            "warnings": ["Out of scope query."],
             "execution_time_ms": (time.time() - start_time) * 1000
         }
         conn.close()
         return response
 
-    # 3. Reranking Layer (BGE-Reranker Base)
-    reranked_chunks = Reranker.rerank(query, candidates, top_k=request.top_k)
-    
     # 4. LLM Response Generation (quantized Qwen2.5-7B)
-    llm_output = LLMClient.generate_answer(query, reranked_chunks)
+    llm_output = LLMClient.generate_answer(query, final_chunks, sub_queries=sub_queries)
     
     # 5. Citation Verification Engine
-    final_response = CitationVerifier.verify_citations(llm_output, reranked_chunks)
+    final_response = CitationVerifier.verify_citations(llm_output, final_chunks)
     
     # Format execution metadata
     execution_time_ms = (time.time() - start_time) * 1000

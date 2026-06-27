@@ -1,8 +1,11 @@
+import os
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
-import os
 import sqlite3
 
 # Import our RAG modules
@@ -27,13 +30,19 @@ app.add_middleware(
 # Global retriever instance to avoid building BM25/loading models on every query
 print("Initializing Hybrid Retriever at server startup...")
 hybrid_retriever = HybridRetriever()
+print("Pre-loading Embedding model at server startup...")
+from retrieval.dense import EmbeddingService
+EmbeddingService.get_model()
+print("Pre-loading Reranker model at server startup...")
+from retrieval.reranker import Reranker
+Reranker.get_model()
 print("Server RAG components loaded successfully.")
 
 class QueryRequest(BaseModel):
     query: str
 
 @app.post("/api/query")
-async def query_rag(req: QueryRequest):
+def query_rag(req: QueryRequest):
     """
     Exposes the complete RAG query pipeline.
     Retrieves, reranks, generates an answer via LLM, and verifies citations.
@@ -43,25 +52,64 @@ async def query_rag(req: QueryRequest):
         raise HTTPException(status_code=400, detail="Query text cannot be empty.")
         
     try:
-        # 1. Retrieve candidates
-        candidates = hybrid_retriever.search(query_text, top_k=30)
-        if not candidates:
+        print(f"\n--- Processing query: '{query_text}' ---")
+        
+        # Check for simple greetings or smalltalk to respond instantly
+        greeting_res = LLMClient.check_greetings_and_smalltalk(query_text)
+        if greeting_res:
+            print(f"Intercepted greeting/smalltalk query: '{query_text}'")
+            return greeting_res
+            
+        # Decompose query if it's compound / multi-query
+        sub_queries = LLMClient.decompose_query(query_text)
+        print(f"Decomposed into {len(sub_queries)} queries: {sub_queries}")
+        
+        merged_chunks = []
+        seen_chunk_ids = set()
+        
+        for idx, sub_q in enumerate(sub_queries):
+            print(f"Retrieving and reranking for sub-query [{idx+1}/{len(sub_queries)}]: '{sub_q}'")
+            # Fetch candidates for each sub-query
+            candidates = hybrid_retriever.search(sub_q, top_k=5)
+            if not candidates:
+                continue
+            # Rerank candidates against this sub-query
+            reranked_sub = Reranker.rerank(sub_q, candidates, top_k=5)
+            for chunk in reranked_sub:
+                c_id = chunk["chunk_id"]
+                if c_id not in seen_chunk_ids:
+                    seen_chunk_ids.add(c_id)
+                    merged_chunks.append(chunk)
+                else:
+                    # If already present, keep the one with higher rerank score
+                    for existing in merged_chunks:
+                        if existing["chunk_id"] == c_id:
+                            if chunk.get("rerank_score", 0.0) > existing.get("rerank_score", 0.0):
+                                existing["rerank_score"] = chunk["rerank_score"]
+                            break
+                            
+        # Sort by rerank score descending and limit to top results
+        merged_chunks.sort(key=lambda x: x.get("rerank_score", 0.0), reverse=True)
+        final_chunks = merged_chunks[:15]
+        
+        if not final_chunks or final_chunks[0].get("rerank_score", -99.0) < 0.02:
+            print("No relevant chunks found or top chunk relevance score too low. Query is likely out-of-scope.")
             return {
-                "response": "The provided RBI circulars do not contain sufficient information to answer this query.",
+                "response": "The query is outside the scope of the ingested RBI regulatory guidelines. I am only trained to answer questions about RBI compliance and circulars.",
                 "citations": [],
-                "warnings": [],
+                "warnings": ["Out of scope query."],
                 "hallucination_detected": False,
                 "answerable": False
             }
             
-        # 2. Rerank
-        reranked = Reranker.rerank(query_text, candidates, top_k=5)
-        
         # 3. LLM Generation
-        llm_output = LLMClient.generate_answer(query_text, reranked)
+        print("Generating answer from LLM...")
+        llm_output = LLMClient.generate_answer(query_text, final_chunks, sub_queries=sub_queries)
         
         # 4. Citation Verification
-        final_response = CitationVerifier.verify_citations(llm_output, reranked)
+        print("Verifying citations...")
+        final_response = CitationVerifier.verify_citations(llm_output, final_chunks)
+        print("Query processing completed successfully!")
         
         return final_response
     except Exception as e:
